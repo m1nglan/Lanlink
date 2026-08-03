@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -14,6 +15,9 @@ static const char *TAG = "Main";
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=========Main=========");
+    ESP_LOGI(TAG, "空闲堆: %u 字节, 历史最低: %u 字节",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size());
 
     /* 1. 连接 WiFi(本次只测这个) */
     WiFi wifi;
