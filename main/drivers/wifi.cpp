@@ -9,6 +9,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
+#include "psa/crypto.h"
 
 static const char *TAG = "wifi";
 
@@ -42,6 +43,12 @@ void WiFi::event_handler(void *arg, const char *event_base,
 
 esp_err_t WiFi::init(void)
 {
+    /* 0. 先初始化 PSA 加密库:
+     * WPA2 四次握手会用 PSA(psa_import_key)算 HMAC-SHA1,
+     * 若不先 psa_crypto_init,PSA 全局互斥锁未建好会在握手时崩溃
+     * (xQueueSemaphoreTake: uxItemSize == 0 断言)。幂等,可重复调用。 */
+    ESP_RETURN_ON_ERROR(psa_crypto_init(), TAG, "psa_crypto_init failed");
+
     /* 1. 初始化 NVS(esp_wifi 依赖) */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
