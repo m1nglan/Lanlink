@@ -1,6 +1,7 @@
 #include "drivers/wifi.hpp"
 
 #include <string.h>
+#include <stdlib.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -10,7 +11,58 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 static const char *TAG = "wifi";
+
+static const char *wifi_event_name(int32_t id)
+{
+    switch (id) {
+    case WIFI_EVENT_STA_START:       return "STA_START";
+    case WIFI_EVENT_STA_STOP:        return "STA_STOP";
+    case WIFI_EVENT_STA_CONNECTED:   return "STA_CONNECTED";
+    case WIFI_EVENT_STA_DISCONNECTED: return "STA_DISCONNECTED";
+    case WIFI_EVENT_STA_AUTHMODE_CHANGE: return "AUTHMODE_CHANGE";
+    default:                          return "?";
+    }
+}
+
+esp_err_t WiFi::scan_and_log(void)
+{
+    /* 用 = {} 整体清零,再逐字段赋值,避免 -Werror=missing-field-initializers */
+    wifi_scan_config_t scan_cfg = {};
+    scan_cfg.ssid = NULL;
+    scan_cfg.bssid = NULL;
+    scan_cfg.channel = 0;
+    scan_cfg.show_hidden = true;
+    scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    scan_cfg.scan_time.active.min = 100;
+    scan_cfg.scan_time.active.max = 300;
+
+    ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&scan_cfg, true), TAG, "scan_start failed");
+
+    uint16_t count = 0;
+    ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&count), TAG, "get_ap_num failed");
+    ESP_LOGI(TAG, "扫描到 %u 个 AP", (unsigned)count);
+
+    if (count > 0) {
+        wifi_ap_record_t *recs = (wifi_ap_record_t *)malloc(count * sizeof(wifi_ap_record_t));
+        if (recs != NULL) {
+            uint16_t got = count;
+            if (esp_wifi_scan_get_ap_records(&got, recs) == ESP_OK) {
+                for (uint16_t i = 0; i < got; i++) {
+                    ESP_LOGI(TAG, "AP[%u] ssid=%.32s rssi=%d ch=%d auth=%d",
+                             (unsigned)i, recs[i].ssid, recs[i].rssi,
+                             recs[i].primary, (int)recs[i].authmode);
+                }
+            }
+            free(recs);
+        }
+    }
+    return ESP_OK;
+}
 
 void WiFi::event_handler(void *arg, const char *event_base,
                          int32_t event_id, void *event_data)
@@ -20,17 +72,33 @@ void WiFi::event_handler(void *arg, const char *event_base,
         return;
     }
 
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        /* STA 启动完成,发起连接 */
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        self->m_connected = false;
-        if (self->m_retry_count < WIFI_MAX_RETRY) {
-            self->m_retry_count++;
-            ESP_LOGW(TAG, "连接断开,第 %d/%d 次重连...", self->m_retry_count, WIFI_MAX_RETRY);
-            esp_wifi_connect();
-        } else {
-            ESP_LOGE(TAG, "重连次数耗尽(%d),停止连接", WIFI_MAX_RETRY);
+    if (event_base == WIFI_EVENT) {
+        ESP_LOGI(TAG, "WIFI_EVENT: %s (%ld)", wifi_event_name(event_id), (long)event_id);
+
+        if (event_id == WIFI_EVENT_STA_START) {
+            /* 先关省电,再发起连接:
+             * 省电的 PM 睡眠切换在 ESP32-S3 + IDF v6.0.1 上偶发崩溃(esp_timer 竞态);
+             * 且连接过程中再改省电设置可能干扰连接流程。 */
+            esp_err_t ps = esp_wifi_set_ps(WIFI_PS_NONE);
+            ESP_LOGI(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) = %s", esp_err_to_name(ps));
+
+            esp_err_t ret = esp_wifi_connect();
+            ESP_LOGI(TAG, "esp_wifi_connect() = %s", esp_err_to_name(ret));
+        } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+            ESP_LOGI(TAG, "STA 已关联 AP");
+        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            wifi_event_sta_disconnected_t *ev =
+                static_cast<wifi_event_sta_disconnected_t *>(event_data);
+            ESP_LOGW(TAG, "断开, reason=%d", ev ? ev->reason : -1);
+            self->m_connected = false;
+            if (self->m_retry_count < WIFI_MAX_RETRY) {
+                self->m_retry_count++;
+                ESP_LOGW(TAG, "第 %d/%d 次重连...", self->m_retry_count, WIFI_MAX_RETRY);
+                esp_err_t ret = esp_wifi_connect();
+                ESP_LOGI(TAG, "esp_wifi_connect() = %s", esp_err_to_name(ret));
+            } else {
+                ESP_LOGE(TAG, "重连次数耗尽(%d),停止连接", WIFI_MAX_RETRY);
+            }
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = static_cast<ip_event_got_ip_t *>(event_data);
@@ -79,6 +147,8 @@ esp_err_t WiFi::init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), TAG, "esp_wifi_set_config failed");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "esp_wifi_start failed");
 
+    /* 注:关闭省电已移到 STA_START 事件处理里、在 esp_wifi_connect() 之前执行,
+     * 避免连接过程中再改省电设置导致连接停滞。 */
     ESP_LOGI(TAG, "WiFi STA 初始化完成,正在连接 %s ...", WIFI_SSID);
     return ESP_OK;
 }

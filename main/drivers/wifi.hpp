@@ -26,6 +26,9 @@ public:
     /*! 是否已成功获取 IP(即连接成功) */
     bool is_connected(void) const { return m_connected; }
 
+    /*! 扫描并打印周围可见 AP(诊断用) */
+    esp_err_t scan_and_log(void);
+
     /*! 当前已重连次数 */
     int get_retry_count(void) const { return m_retry_count; }
 
