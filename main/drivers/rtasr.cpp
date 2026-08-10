@@ -6,15 +6,9 @@
 
 #include "esp_log.h"
 #include "esp_check.h"
-#include "esp_transport.h"
-#include "esp_transport_ws.h"
-#if RTASR_USE_TLS
-#include "esp_transport_ssl.h"
-#include "esp_crt_bundle.h"
-#else
-#include "esp_transport_tcp.h"
-#endif
+#include "esp_websocket_client.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "psa/crypto.h"
 
 #include "apikey.h"
@@ -147,59 +141,58 @@ esp_err_t RtAsr::init(void)
         return ESP_FAIL;
     }
 
-    /* 握手参数(严格按文档:appid/ts/signa,可选 lang/vadMdn/pd) */
-    char path[256];
-    snprintf(path, sizeof(path),
-             RTASR_PATH "?appid=%s&ts=%lld&signa=%s&lang=%s&vadMdn=%d%s%s",
+    /* 构建 ws:// URI(签名等参数放 query,esp_websocket_client 会自动解析) */
+    char uri[320];
+    snprintf(uri, sizeof(uri),
+             "ws://%s:%d" RTASR_PATH "?appid=%s&ts=%lld&signa=%s&lang=%s&vadMdn=%d%s%s",
+             RTASR_HOST, RTASR_PORT,
              XFYUN_APPID, (long long)time(NULL), signa,
              RTASR_LANG, RTASR_VAD_MDN,
              (RTASR_PD[0] != '\0' ? "&pd=" : ""), RTASR_PD);
 
-    /* 创建传输链:ws 包在 tcp(或 ssl)之上 */
-    esp_transport_handle_t parent = NULL;
-#if RTASR_USE_TLS
-    parent = esp_transport_ssl_init();
-    if (parent == NULL) {
-        ESP_LOGE(TAG, "ssl transport 创建失败");
-        return ESP_ERR_NO_MEM;
-    }
-    esp_transport_ssl_crt_bundle_attach(parent, esp_crt_bundle_attach);
-#else
-    parent = esp_transport_tcp_init();
-    if (parent == NULL) {
-        ESP_LOGE(TAG, "tcp transport 创建失败");
-        return ESP_ERR_NO_MEM;
-    }
-#endif
+    esp_websocket_client_config_t cfg = {};
+    cfg.uri = uri;
+    cfg.buffer_size = 4096;                         /*!< 接收缓冲,容纳 RTASR 结果 */
+    cfg.network_timeout_ms = RTASR_CONNECT_TIMEOUT_MS;
+    cfg.disable_auto_reconnect = true;              /*!< RTASR 会话不自动重连,断线交给上层重建 */
 
-    esp_transport_handle_t ws = esp_transport_ws_init(parent);
-    if (ws == NULL) {
-        ESP_LOGE(TAG, "ws transport 创建失败");
+    m_ws = esp_websocket_client_init(&cfg);
+    if (m_ws == NULL) {
+        ESP_LOGE(TAG, "esp_websocket_client_init 失败");
         return ESP_ERR_NO_MEM;
     }
-    esp_transport_ws_set_path(ws, path);
-    m_ws = ws;
 
-    ESP_LOGI(TAG, "连接 %s:%d%s", RTASR_HOST, RTASR_PORT, path);
-    if (esp_transport_connect(ws, RTASR_HOST, RTASR_PORT, RTASR_CONNECT_TIMEOUT_MS) != 0) {
-        ESP_LOGE(TAG, "连接失败");
-        esp_transport_destroy(ws);
+    esp_err_t ret = esp_websocket_register_events(m_ws, WEBSOCKET_EVENT_ANY,
+                                                  &RtAsr::ws_event_handler, this);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册事件失败: %s", esp_err_to_name(ret));
+        esp_websocket_client_destroy(m_ws);
         m_ws = NULL;
-        return ESP_FAIL;
+        return ret;
     }
-    int code = esp_transport_ws_get_upgrade_request_status(ws);
-    if (code != 101) {
-        ESP_LOGE(TAG, "WebSocket 握手失败 HTTP=%d", code);
-        esp_transport_destroy(ws);
+
+    ESP_LOGI(TAG, "连接 %s ...", uri);
+    ret = esp_websocket_client_start(m_ws);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "启动失败: %s", esp_err_to_name(ret));
+        esp_websocket_client_destroy(m_ws);
         m_ws = NULL;
-        return ESP_FAIL;
+        return ret;
+    }
+
+    /* 等待 WebSocket 握手完成(连接成功) */
+    uint32_t deadline = (uint32_t)(esp_timer_get_time() / 1000) + RTASR_CONNECT_TIMEOUT_MS;
+    while (!esp_websocket_client_is_connected(m_ws)) {
+        if ((uint32_t)(esp_timer_get_time() / 1000) > deadline) {
+            ESP_LOGE(TAG, "连接超时");
+            esp_websocket_client_destroy(m_ws);
+            m_ws = NULL;
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
     m_connected = true;
     ESP_LOGI(TAG, "WebSocket 握手成功(101)");
-
-    /* 启动 reader 任务收结果 */
-    m_stop = false;
-    xTaskCreatePinnedToCore(&RtAsr::reader_task, "rtasr_reader", 6144, this, 5, &m_reader, 1);
     return ESP_OK;
 }
 
@@ -208,11 +201,9 @@ esp_err_t RtAsr::send_audio(const uint8_t *data, size_t len, uint32_t timeout_ms
     if (m_ws == NULL || !m_connected) {
         return ESP_ERR_INVALID_STATE;
     }
-    int ret = esp_transport_ws_send_raw((esp_transport_handle_t)m_ws,
-                                        WS_TRANSPORT_OPCODES_BINARY,
-                                        (const char *)data, (int)len, (int)timeout_ms);
-    if (ret < 0) {
-        ESP_LOGE(TAG, "发送音频失败 ret=%d", ret);
+    int sent = esp_websocket_client_send_bin(m_ws, (const char *)data, (int)len, timeout_ms);
+    if (sent < 0) {
+        ESP_LOGE(TAG, "发送音频失败 ret=%d", sent);
         m_connected = false;
         return ESP_FAIL;
     }
@@ -225,10 +216,8 @@ esp_err_t RtAsr::finish(uint32_t timeout_ms)
         return ESP_ERR_INVALID_STATE;
     }
     const char *end = "{\"end\": true}";
-    int ret = esp_transport_ws_send_raw((esp_transport_handle_t)m_ws,
-                                        WS_TRANSPORT_OPCODES_BINARY,
-                                        end, (int)strlen(end), (int)timeout_ms);
-    if (ret < 0) {
+    int sent = esp_websocket_client_send_bin(m_ws, end, (int)strlen(end), timeout_ms);
+    if (sent < 0) {
         m_connected = false;
         return ESP_FAIL;
     }
@@ -243,51 +232,45 @@ void RtAsr::set_result_callback(rtasr_result_cb_t cb, void *user_ctx)
 
 void RtAsr::deinit(void)
 {
-    m_stop = true;
     m_connected = false;
-    if (m_reader != NULL) {
-        vTaskDelay(pdMS_TO_TICKS(700));   /* 等 reader 在下次读超时退出 */
-        if (m_reader != NULL) {
-            vTaskDelete(m_reader);
-            m_reader = NULL;
-        }
-    }
     if (m_ws != NULL) {
-        esp_transport_destroy((esp_transport_handle_t)m_ws);
+        esp_websocket_client_stop(m_ws);
+        esp_websocket_client_destroy(m_ws);
         m_ws = NULL;
     }
 }
 
-void RtAsr::reader_task(void *arg)
+void RtAsr::ws_event_handler(void *handler_args, esp_event_base_t base,
+                             int32_t event_id, void *event_data)
 {
-    RtAsr *self = static_cast<RtAsr *>(arg);
-    self->run_reader();
-    self->m_reader = NULL;
-    vTaskDelete(NULL);
-}
-
-void RtAsr::run_reader(void)
-{
-    char buf[4096];
-    while (!m_stop) {
-        int len = esp_transport_read((esp_transport_handle_t)m_ws, buf, sizeof(buf) - 1,
-                                     RTASR_READ_TIMEOUT_MS);
-        if (len > 0) {
-            buf[len] = '\0';
-            ws_transport_opcodes_t op = esp_transport_ws_get_read_opcode((esp_transport_handle_t)m_ws);
-            if (op == WS_TRANSPORT_OPCODES_TEXT) {
-                handle_text(buf, len);
-            } else if (op == WS_TRANSPORT_OPCODES_CLOSE) {
-                ESP_LOGI(TAG, "服务端关闭连接");
-                break;
-            }
-        } else if (len < 0) {
-            ESP_LOGW(TAG, "读取异常(%d),连接断开", len);
-            break;
-        }
-        /* len==0 为读超时,继续循环检查 m_stop */
+    (void)base;
+    RtAsr *self = static_cast<RtAsr *>(handler_args);
+    if (self == nullptr) {
+        return;
     }
-    m_connected = false;
+
+    esp_websocket_event_data_t *data = static_cast<esp_websocket_event_data_t *>(event_data);
+    switch (event_id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "WEBSOCKET_EVENT_CONNECTED");
+        self->m_connected = true;
+        break;
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "WEBSOCKET_EVENT_DISCONNECTED");
+        self->m_connected = false;
+        break;
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "WEBSOCKET_EVENT_ERROR");
+        self->m_connected = false;
+        break;
+    case WEBSOCKET_EVENT_DATA:
+        if (data != nullptr && data->op_code == WS_TRANSPORT_OPCODES_TEXT) {
+            self->handle_text(data->data_ptr, data->data_len);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 void RtAsr::handle_text(const char *payload, int len)
