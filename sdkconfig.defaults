@@ -1,0 +1,21 @@
+# ============================================================
+# Lanlink - n16r8 板固化配置 (16MB flash + 8MB Octal PSRAM)
+# 该文件在 clean / setTarget 重新配置时会被自动应用。
+# ============================================================
+
+# --- Flash: 16MB (n16r8) ---
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# --- 分区表: 单应用大分区 (factory = 1500K) ---
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
+
+# --- PSRAM: 8MB Octal @80MHz (n16r8) ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# --- main 任务栈增大 (修复根因: I2sMic 的 m_raw 2560B + main 的 pcm 1280B 超过默认 3584B 栈导致溢出) ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

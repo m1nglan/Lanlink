@@ -48,6 +48,9 @@ cmake_install.cmake
 install_manifest.txt
 CTestTestfile.cmake
 
+# 讯飞开放平台凭据(勿提交)
+main/apikey.h
+
 # Python environment files
 *.pyc
 *.pyo
