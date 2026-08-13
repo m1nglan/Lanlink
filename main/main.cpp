@@ -7,7 +7,7 @@
 
 /* 二分定位开关:0=禁用,1=启用 */
 #define RTASR_ENABLED 0
-#define MIC_ENABLED 0
+#define MIC_ENABLED 1
 #define BUTTON_ENABLED 0
 
 #include "drivers/button.hpp"

@@ -48,13 +48,13 @@ static void base64_encode(const unsigned char *src, size_t slen, char *dst, size
 }
 
 /* ---------------- 签名:signa = base64(HmacSHA1(MD5(appid+ts), api_key)) ---------------- */
-static void build_signa(char *signa, size_t signa_size)
+static void build_signa(time_t ts, char *signa, size_t signa_size)
 {
-    char ts[16];
-    snprintf(ts, sizeof(ts), "%lld", (long long)time(NULL));
+    char ts_str[16];
+    snprintf(ts_str, sizeof(ts_str), "%lld", (long long)ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "%s%s", XFYUN_APPID, ts);
+    snprintf(base, sizeof(base), "%s%s", XFYUN_APPID, ts_str);
 
     unsigned char md5raw[16];
     size_t md5len = 0;
@@ -134,9 +134,10 @@ esp_err_t RtAsr::init(void)
     ESP_RETURN_ON_ERROR(psa_crypto_init(), TAG, "psa_crypto_init failed");
     ESP_RETURN_ON_ERROR(sync_time(), TAG, "time sync failed");
 
-    /* 生成签名 */
+    /* 生成签名(统一时间戳:signa 与 URL 必须用同一个 ts,否则 10110 illegal signa) */
+    time_t ts = time(NULL);
     char signa[64];
-    build_signa(signa, sizeof(signa));
+    build_signa(ts, signa, sizeof(signa));
     if (strncmp(signa, "SIGNA_ERR", 9) == 0) {
         return ESP_FAIL;
     }
@@ -146,7 +147,7 @@ esp_err_t RtAsr::init(void)
     snprintf(uri, sizeof(uri),
              "ws://%s:%d" RTASR_PATH "?appid=%s&ts=%lld&signa=%s&lang=%s&vadMdn=%d%s%s",
              RTASR_HOST, RTASR_PORT,
-             XFYUN_APPID, (long long)time(NULL), signa,
+             XFYUN_APPID, (long long)ts, signa,
              RTASR_LANG, RTASR_VAD_MDN,
              (RTASR_PD[0] != '\0' ? "&pd=" : ""), RTASR_PD);
 
