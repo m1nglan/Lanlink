@@ -97,8 +97,6 @@ esp_err_t WiFi::init(void)
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), TAG, "esp_wifi_set_config failed");
-    /* 关省电:规避 v6.0.2 WiFi 启动时 PHY/cache 与 esp_timer 中断的竞态崩溃 */
-    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_NONE), TAG, "esp_wifi_set_ps failed");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "esp_wifi_start failed");
 
     ESP_LOGI(TAG, "wifi_init_sta finished, 等待连接 %s ...", WIFI_SSID);

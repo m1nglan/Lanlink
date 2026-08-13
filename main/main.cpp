@@ -6,9 +6,9 @@
 #include "freertos/task.h"
 
 /* 二分定位开关:0=禁用,1=启用 */
-#define RTASR_ENABLED 0
+#define RTASR_ENABLED 1
 #define MIC_ENABLED 1
-#define BUTTON_ENABLED 0
+#define BUTTON_ENABLED 1
 
 #include "drivers/button.hpp"
 #include "drivers/wifi.hpp"
@@ -55,7 +55,7 @@ extern "C" void app_main(void)
     uint32_t frame = 0;
     while (1) {
 #if MIC_ENABLED
-        int16_t pcm[I2S_MIC_FRAME_BYTES / 2];
+        static int16_t pcm[I2S_MIC_FRAME_BYTES / 2];  /* static 缓冲,不在栈上,避免栈溢出 */
         if (mic.read_frame(pcm, sizeof(pcm), 100) == ESP_OK) {
 #if RTASR_ENABLED
             asr.send_audio((const uint8_t *)pcm, sizeof(pcm), RTASR_SEND_TIMEOUT_MS);

@@ -60,6 +60,6 @@ public:
 private:
     i2s_chan_handle_t m_rx = nullptr;
     bool m_running = false;
-    uint32_t m_raw[I2S_MIC_FRAME_BYTES / 2]; /*!< 底层 32bit 槽位数据缓冲（用于转 16bit PCM） */
+    /* 底层 32bit 槽位数据缓冲改为 static(不在对象/栈上),避免 main 任务栈溢出 */
 };
 

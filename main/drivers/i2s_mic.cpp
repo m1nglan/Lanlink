@@ -112,8 +112,11 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
     const size_t samples16 = byte_size / 2;                 /* int16 采样点个数 */
     const size_t raw_bytes = samples16 * sizeof(uint32_t);  /* 底层 32bit 槽位数据量 */
 
+    /* static 缓冲: 不在栈上,避免调用方(main 任务)栈溢出 */
+    static uint32_t raw[I2S_MIC_FRAME_BYTES / 2];
+
     size_t bytes_read = 0;
-    esp_err_t ret = i2s_channel_read(m_rx, m_raw, raw_bytes, &bytes_read, timeout_ms);
+    esp_err_t ret = i2s_channel_read(m_rx, raw, raw_bytes, &bytes_read, timeout_ms);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -124,7 +127,7 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
     }
 
     /* INMP441 的 24bit 数据左对齐在 32bit 槽位，右移 16 位得到 16bit PCM (s16le) */
-    const uint32_t *src = m_raw;
+    const uint32_t *src = raw;
     for (size_t i = 0; i < samples16; i++) {
         dst[i] = (int16_t)(src[i] >> 16);
     }

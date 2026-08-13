@@ -1,7 +1,6 @@
 # ============================================================
 # Lanlink - n16r8 板固化配置 (16MB flash + 8MB Octal PSRAM)
-# 该文件在 clean / setTarget 重新配置时会被自动应用,
-# 避免仅靠修改 sdkconfig 文本导致配置被重置丢失。
+# 该文件在 clean / setTarget 重新配置时会被自动应用。
 # ============================================================
 
 # --- Flash: 16MB (n16r8) ---
@@ -12,20 +11,11 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
 
-# --- PSRAM: 临时关闭(验证 Cache error 是否与 Octal @80MHz PSRAM 相关) ---
-# CONFIG_SPIRAM is not set
+# --- PSRAM: 8MB Octal @80MHz (n16r8) ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
-# --- WiFi 任务固定到核1 (缓解 v6.0.1 esp_timer 竞态崩溃) ---
-CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_1=y
-
-# --- 关闭 STA 断开后的省电(避免 esp_phy_disable 触发 esp_timer 删除竞态, 根治问题1) ---
-CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
-
-# --- 禁用断言 (规避 esp_timer FreeRTOS 任务通知竞态崩溃, v6.0.2 未修复) ---
-CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
-
-# --- esp_timer 任务+ISR 不固定核(No affinity, 让 FreeRTOS 自己调度) ---
-# 注: No affinity 也是实验特性, 依赖下面开关
-CONFIG_ESP_TIMER_SHOW_EXPERIMENTAL=y
-CONFIG_ESP_TIMER_TASK_AFFINITY_NO_AFFINITY=y
-CONFIG_ESP_TIMER_ISR_AFFINITY_NO_AFFINITY=y
+# --- main 任务栈增大 (修复根因: I2sMic 的 m_raw 2560B + main 的 pcm 1280B 超过默认 3584B 栈导致溢出) ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
