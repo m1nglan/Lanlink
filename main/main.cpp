@@ -33,7 +33,7 @@ extern "C" void app_main(void)
 
     /* 2. 按键 */
 #if BUTTON_ENABLED
-    Button btn(GPIO_NUM_12);
+    Button btn(GPIO_NUM_10);
     ESP_ERROR_CHECK(btn.init());
 #endif
 

@@ -47,80 +47,106 @@ static void base64_encode(const unsigned char *src, size_t slen, char *dst, size
     dst[o] = '\0';
 }
 
-/* ---------------- 签名:signa = base64(HmacSHA1(MD5(appid+ts), api_key)) ---------------- */
-static void build_signa(time_t ts, char *signa, size_t signa_size)
+/* ---------------- URL 编码(authorization/date 里的 +/=空格逗号冒号需转义) ---------------- */
+static void url_encode(const char *src, char *dst, size_t dst_size)
 {
-    char ts_str[16];
-    snprintf(ts_str, sizeof(ts_str), "%lld", (long long)ts);
-
-    char base[64];
-    snprintf(base, sizeof(base), "%s%s", XFYUN_APPID, ts_str);
-
-    unsigned char md5raw[16];
-    size_t md5len = 0;
-    psa_status_t st = psa_hash_compute(PSA_ALG_MD5,
-                                       (const uint8_t *)base, strlen(base),
-                                       md5raw, sizeof(md5raw), &md5len);
-    if (st != PSA_SUCCESS) {
-        ESP_LOGE(TAG, "MD5 计算失败: %d", (int)st);
-        snprintf(signa, signa_size, "SIGNA_ERR");
-        return;
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (const char *p = src; *p && o + 3 < dst_size; p++) {
+        unsigned char c = (unsigned char)*p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            dst[o++] = (char)c;
+        } else {
+            dst[o++] = '%';
+            dst[o++] = hex[c >> 4];
+            dst[o++] = hex[c & 0xf];
+        }
     }
+    dst[o] = '\0';
+}
 
-    char md5hex[33];
-    for (int i = 0; i < 16; i++) {
-        snprintf(md5hex + i * 2, 3, "%02x", md5raw[i]);
-    }
+/* ---------------- 鉴权: HMAC-SHA256 签名 → authorization(base64) ---------------- */
+static esp_err_t build_authorization(char *authorization, size_t auth_size,
+                                     char *date_out, size_t date_size)
+{
+    /* 1. RFC1123 UTC 时间(服务端允许 300s 偏差) */
+    time_t now = time(NULL);
+    struct tm tm_gmt;
+    gmtime_r(&now, &tm_gmt);
+    strftime(date_out, date_size, "%a, %d %b %Y %H:%M:%S GMT", &tm_gmt);
 
-    unsigned char hmac[32];
-    size_t hmaclen = 0;
+    /* 2. 签名原始串: host / date / request-line 三行,换行分隔,冒号后带空格 */
+    char sign_origin[160];
+    snprintf(sign_origin, sizeof(sign_origin),
+             "host: %s\ndate: %s\nGET " RTASR_PATH " HTTP/1.1",
+             RTASR_HOST, date_out);
 
-    /* mbedtls 的 psa_mac_compute 需要先导入密钥得到 key ID */
+    /* 3. HMAC-SHA256(sign_origin, APISecret) */
     psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
     psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
-    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_1));
+    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
 
     mbedtls_svc_key_id_t key_id = 0;
-    st = psa_import_key(&attr,
-                        (const uint8_t *)XFYUN_API_KEY, strlen(XFYUN_API_KEY),
-                        &key_id);
+    psa_status_t st = psa_import_key(&attr,
+                                     (const uint8_t *)XFYUN_API_SERCET, strlen(XFYUN_API_SERCET),
+                                     &key_id);
     if (st != PSA_SUCCESS) {
         ESP_LOGE(TAG, "psa_import_key 失败: %d", (int)st);
-        snprintf(signa, signa_size, "SIGNA_ERR");
-        return;
+        return ESP_FAIL;
     }
 
-    st = psa_mac_compute(key_id, PSA_ALG_HMAC(PSA_ALG_SHA_1),
-                         (const uint8_t *)md5hex, 32,
-                         hmac, sizeof(hmac), &hmaclen);
+    unsigned char sig[32];
+    size_t sig_len = 0;
+    st = psa_mac_compute(key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256),
+                         (const uint8_t *)sign_origin, strlen(sign_origin),
+                         sig, sizeof(sig), &sig_len);
     psa_destroy_key(key_id);
     if (st != PSA_SUCCESS) {
-        ESP_LOGE(TAG, "HMAC-SHA1 计算失败: %d", (int)st);
-        snprintf(signa, signa_size, "SIGNA_ERR");
-        return;
+        ESP_LOGE(TAG, "HMAC-SHA256 失败: %d", (int)st);
+        return ESP_FAIL;
     }
 
-    base64_encode(hmac, hmaclen, signa, signa_size);
+    char signature[64];
+    base64_encode(sig, sig_len, signature, sizeof(signature));
+
+    /* 4. authorization_origin */
+    char auth_origin[320];
+    snprintf(auth_origin, sizeof(auth_origin),
+             "api_key=\"%s\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"%s\"",
+             XFYUN_API_KEY, signature);
+
+    /* 5. authorization = base64(auth_origin) */
+    base64_encode((const unsigned char *)auth_origin, strlen(auth_origin),
+                  authorization, auth_size);
+
+    return ESP_OK;
 }
 
-/* ---------------- SNTP 时间同步(签名需要当前 Unix 时间戳) ---------------- */
+/* ---------------- SNTP 时间同步(鉴权需要当前 UTC 时间) ---------------- */
 static esp_err_t sync_time(void)
 {
     ESP_LOGI(TAG, "SNTP 同步时间...");
-    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    /* 国内 NTP 服务器(阿里云),比 pool.ntp.org 稳定可达 */
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
     esp_err_t ret = esp_netif_sntp_init(&cfg);   /* config.start=true → 自动启动 */
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SNTP init 失败: %s", esp_err_to_name(ret));
         return ret;
     }
-    ret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(15000));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "时间同步失败/超时,签名将无效");
-        return ESP_ERR_TIMEOUT;
+
+    /* 最多重试 3 次,每次 10s */
+    for (int i = 0; i < 3; i++) {
+        ret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "时间已同步,当前 ts=%lld", (long long)time(NULL));
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "同步超时,重试 %d/3...", i + 1);
     }
-    ESP_LOGI(TAG, "时间已同步,当前 ts=%lld", (long long)time(NULL));
-    return ESP_OK;
+    ESP_LOGE(TAG, "时间同步失败,鉴权将无效");
+    return ESP_ERR_TIMEOUT;
 }
 
 /* ======================= 类实现 ======================= */
@@ -134,28 +160,30 @@ esp_err_t RtAsr::init(void)
     ESP_RETURN_ON_ERROR(psa_crypto_init(), TAG, "psa_crypto_init failed");
     ESP_RETURN_ON_ERROR(sync_time(), TAG, "time sync failed");
 
-    /* 生成签名(统一时间戳:signa 与 URL 必须用同一个 ts,否则 10110 illegal signa) */
-    time_t ts = time(NULL);
-    char signa[64];
-    build_signa(ts, signa, sizeof(signa));
-    if (strncmp(signa, "SIGNA_ERR", 9) == 0) {
-        return ESP_FAIL;
-    }
+    /* 生成鉴权 authorization 和 date */
+    char authorization[384];
+    char date[64];
+    ESP_RETURN_ON_ERROR(build_authorization(authorization, sizeof(authorization),
+                                            date, sizeof(date)),
+                        TAG, "build_authorization failed");
 
-    /* 构建 ws:// URI(签名等参数放 query,esp_websocket_client 会自动解析) */
-    char uri[320];
+    /* authorization/date 含 +/=空格逗号冒号,URL 里需转义 */
+    char auth_enc[512];
+    char date_enc[128];
+    url_encode(authorization, auth_enc, sizeof(auth_enc));
+    url_encode(date, date_enc, sizeof(date_enc));
+
+    /* 构建 ws:// URI */
+    char uri[768];
     snprintf(uri, sizeof(uri),
-             "ws://%s:%d" RTASR_PATH "?appid=%s&ts=%lld&signa=%s&lang=%s&vadMdn=%d%s%s",
-             RTASR_HOST, RTASR_PORT,
-             XFYUN_APPID, (long long)ts, signa,
-             RTASR_LANG, RTASR_VAD_MDN,
-             (RTASR_PD[0] != '\0' ? "&pd=" : ""), RTASR_PD);
+             "ws://%s:%d" RTASR_PATH "?authorization=%s&date=%s&host=%s",
+             RTASR_HOST, RTASR_PORT, auth_enc, date_enc, RTASR_HOST);
 
     esp_websocket_client_config_t cfg = {};
     cfg.uri = uri;
-    cfg.buffer_size = 4096;                         /*!< 接收缓冲,容纳 RTASR 结果 */
+    cfg.buffer_size = 8192;                         /*!< 接收缓冲,容纳结果 JSON */
     cfg.network_timeout_ms = RTASR_CONNECT_TIMEOUT_MS;
-    cfg.disable_auto_reconnect = true;              /*!< RTASR 会话不自动重连,断线交给上层重建 */
+    cfg.disable_auto_reconnect = true;              /*!< 会话不自动重连,断线交给上层重建 */
 
     m_ws = esp_websocket_client_init(&cfg);
     if (m_ws == NULL) {
@@ -193,7 +221,8 @@ esp_err_t RtAsr::init(void)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     m_connected = true;
-    ESP_LOGI(TAG, "WebSocket 握手成功(101)");
+    m_first_frame_sent = false;
+    ESP_LOGI(TAG, "WebSocket 握手成功");
     return ESP_OK;
 }
 
@@ -202,7 +231,30 @@ esp_err_t RtAsr::send_audio(const uint8_t *data, size_t len, uint32_t timeout_ms
     if (m_ws == NULL || !m_connected) {
         return ESP_ERR_INVALID_STATE;
     }
-    int sent = esp_websocket_client_send_bin(m_ws, (const char *)data, (int)len, timeout_ms);
+
+    /* 音频 base64 编码(1280 字节 → 约 1708 字符) */
+    char audio_b64[1740];
+    base64_encode(data, len, audio_b64, sizeof(audio_b64));
+
+    /* 封装 JSON 帧 */
+    char frame[2200];
+    if (!m_first_frame_sent) {
+        /* 首帧: common + business + data(status=0) */
+        snprintf(frame, sizeof(frame),
+                 "{\"common\":{\"app_id\":\"%s\"},"
+                 "\"business\":{\"language\":\"%s\",\"domain\":\"%s\",\"accent\":\"%s\"},"
+                 "\"data\":{\"status\":0,\"format\":\"%s\",\"encoding\":\"raw\",\"audio\":\"%s\"}}",
+                 XFYUN_APPID, RTASR_LANGUAGE, RTASR_DOMAIN, RTASR_ACCENT,
+                 RTASR_AUDIO_FORMAT, audio_b64);
+        m_first_frame_sent = true;
+    } else {
+        /* 中间帧: data(status=1) */
+        snprintf(frame, sizeof(frame),
+                 "{\"data\":{\"status\":1,\"format\":\"%s\",\"encoding\":\"raw\",\"audio\":\"%s\"}}",
+                 RTASR_AUDIO_FORMAT, audio_b64);
+    }
+
+    int sent = esp_websocket_client_send_text(m_ws, frame, (int)strlen(frame), timeout_ms);
     if (sent < 0) {
         ESP_LOGE(TAG, "发送音频失败 ret=%d", sent);
         m_connected = false;
@@ -216,8 +268,8 @@ esp_err_t RtAsr::finish(uint32_t timeout_ms)
     if (m_ws == NULL || !m_connected) {
         return ESP_ERR_INVALID_STATE;
     }
-    const char *end = "{\"end\": true}";
-    int sent = esp_websocket_client_send_bin(m_ws, end, (int)strlen(end), timeout_ms);
+    const char *end = "{\"data\":{\"status\":2}}";
+    int sent = esp_websocket_client_send_text(m_ws, end, (int)strlen(end), timeout_ms);
     if (sent < 0) {
         m_connected = false;
         return ESP_FAIL;
@@ -277,60 +329,37 @@ void RtAsr::ws_event_handler(void *handler_args, esp_event_base_t base,
 void RtAsr::handle_text(const char *payload, int len)
 {
     (void)len;
-    if (strstr(payload, "\"action\":\"started\"")) {
-        ESP_LOGI(TAG, "RTASR 握手成功(started)");
-        return;
-    }
-    if (strstr(payload, "\"action\":\"error\"")) {
+
+    /* 错误: code 非 0(如 401/11200 等) */
+    const char *code = strstr(payload, "\"code\":");
+    if (code != NULL && code[7] != '0') {
         ESP_LOGE(TAG, "RTASR 错误: %s", payload);
         return;
     }
-    if (strstr(payload, "\"action\":\"result\"")) {
-        char text[512] = {0};
-        bool is_final = true;
-        /* 中间结果 type=1(兼容转义/非转义两种形式) */
-        if (strstr(payload, "\\\"type\\\":\\\"1\\\"") != NULL ||
-            strstr(payload, "\"type\":\"1\"") != NULL) {
-            is_final = false;
+
+    /* 提取所有 "w":"文字" 的值拼接 */
+    char text[512] = {0};
+    size_t o = 0;
+    const char *p = payload;
+    while (o + 1 < sizeof(text)) {
+        p = strstr(p, "\"w\":\"");
+        if (p == NULL) {
+            break;
         }
-
-        /* 提取所有 w 字段的值拼接成识别文本 */
-        const char *p = payload;
-        size_t o = 0;
-        while (*p && o + 1 < sizeof(text)) {
-            const char *a = strstr(p, "\\\"w\\\":\\\"");
-            const char *b = strstr(p, "\"w\":\"");
-            const char *hit = NULL;
-            if (a != NULL && (b == NULL || a < b)) hit = a;
-            else if (b != NULL) hit = b;
-            if (hit == NULL) break;
-
-            const bool escaped = (hit == a);
-            const char *val = escaped ? hit + 7 : hit + 5;
-            const char *q = val;
-            if (escaped) {
-                /* 转义形式:值以 \" 结束 */
-                while (*q && o + 1 < sizeof(text)) {
-                    if (*q == '\\' && q[1] == '"') break;
-                    if (*q == '\\' && q[1] == '\\') { text[o++] = '\\'; q += 2; continue; }
-                    text[o++] = *q++;
-                }
-                p = q + 2;
-            } else {
-                /* 普通形式:值以 " 结束 */
-                while (*q && *q != '"' && o + 1 < sizeof(text)) {
-                    text[o++] = *q++;
-                }
-                p = q + 1;
-            }
+        p += 5;  /* 跳过 "w":" */
+        while (*p && *p != '"' && o + 1 < sizeof(text)) {
+            text[o++] = *p++;
         }
-        text[o] = '\0';
+    }
+    text[o] = '\0';
 
-        if (text[0] != '\0') {
-            ESP_LOGI(TAG, "[%s] %s", is_final ? "最终" : "中间", text);
-            if (m_cb != NULL) {
-                m_cb(text, is_final, m_cb_ctx);
-            }
+    /* 最终结果: result.ls == true */
+    bool is_final = (strstr(payload, "\"ls\":true") != NULL);
+
+    if (text[0] != '\0') {
+        ESP_LOGI(TAG, "[%s] %s", is_final ? "最终" : "中间", text);
+        if (m_cb != NULL) {
+            m_cb(text, is_final, m_cb_ctx);
         }
     }
 }
