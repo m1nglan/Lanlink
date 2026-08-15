@@ -1,4 +1,5 @@
 #include "drivers/app_fsm.hpp"
+#include "drivers/i2s_mic.hpp"   /* I2S_MIC_FRAME_BYTES */
 
 #include <string.h>
 #include <stdio.h>
