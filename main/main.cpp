@@ -99,17 +99,27 @@ static void button_task(void *arg)
 {
     (void)arg;
     Button btn(BTN_PIN);       /* IO10: 录音键 */
-    Button btn_svc(BTN_SVC_PIN);  /* IO8: 服务切换键 */
     ESP_ERROR_CHECK(btn.init());
-    ESP_ERROR_CHECK(btn_svc.init());
+
+    /* IO8 服务切换键: 与录音键同款接法(按键接GND,内部上拉,按下为低)。
+     * 不复用 Button 消抖(避免重读抖动误判边沿),直接读 GPIO + 软件边沿。 */
+    gpio_config_t svc_io = {
+        .pin_bit_mask = (1ULL << BTN_SVC_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,     /* 内部上拉,防悬空抖动 */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&svc_io));
 
     bool prev_svc_pressed = false;   /* IO8 上一次的按下状态,用于"按下沿"检测 */
 
     while (1) {
         bool pressed = btn.is_pressed();   /* 阻塞消抖 ~50ms */
-        bool svc_pressed = btn_svc.is_pressed();   /* 阻塞消抖 ~50ms */
 
-        /* IO8 服务切换: 只在"未按下→按下"的边沿触发一次,长按不重复切换 */
+        /* IO8 服务切换: 直接读 GPIO 电平(不消抖重读),只在"未按下→按下"边沿触发一次。
+         * 按下为低(0), 松开为高(1), 内部上拉防抖动。 */
+        bool svc_pressed = (gpio_get_level(BTN_SVC_PIN) == 0);
         if (svc_pressed && !prev_svc_pressed) {
             s_svc_switch_pending = true;   /* 置待切换标志(ws_task 消费) */
         }
