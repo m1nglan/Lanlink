@@ -39,8 +39,16 @@ public:
     /*! 消抖读取,返回原始稳定电平(0 或 1) */
     int read_level(void);
 
+    /*!
+     * 按下沿检测: 返回本次调用起是否发生"未按下→按下"的边沿。
+     * 每次调用触发一次按下沿(长按不重复触发), 需在循环中周期调用。
+     * 内部用单次 GPIO 读取(不消抖重读), 避免长按期间重读抖动误判边沿。
+     */
+    bool is_pressed_edge(void);
+
 private:
     gpio_num_t m_pin;           /*!< 本实例的按键引脚 */
     int m_active_level;         /*!< 本实例按下时对应的电平 */
     bool m_pressed = false;     /*!< 最近一次消抖后的按下状态 */
+    bool m_last_active = false; /*!< 上一次"是否按下"状态(用于沿检测) */
 };
