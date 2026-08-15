@@ -124,11 +124,9 @@ void WS::set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx)
 esp_err_t WS::send_text(const char *text, uint32_t timeout_ms)
 {
     if (m_ws == NULL || !m_connected) {
-        ESP_LOGW(TAG, "send_text 失败: m_ws=%p m_connected=%d", (void *)m_ws, (int)m_connected);
         return ESP_ERR_INVALID_STATE;
     }
     int sent = esp_websocket_client_send_text(m_ws, text, (int)strlen(text), timeout_ms);
-    ESP_LOGI(TAG, "send_text '%s' → %d", text, sent);
     if (sent < 0) {
         ESP_LOGE(TAG, "发送文本失败 ret=%d", sent);
         /* 不置 m_connected=false: 连接死活由 is_stale()(超时无数据)判断,
@@ -141,11 +139,9 @@ esp_err_t WS::send_text(const char *text, uint32_t timeout_ms)
 esp_err_t WS::send_bin(const uint8_t *data, size_t len, uint32_t timeout_ms)
 {
     if (m_ws == NULL || !m_connected) {
-        ESP_LOGW(TAG, "send_bin 失败: m_ws=%p m_connected=%d", (void *)m_ws, (int)m_connected);
         return ESP_ERR_INVALID_STATE;
     }
     int sent = esp_websocket_client_send_bin(m_ws, (const char *)data, (int)len, timeout_ms);
-    ESP_LOGI(TAG, "send_bin len=%d → %d", (int)len, sent);
     if (sent < 0) {
         ESP_LOGE(TAG, "发送二进制失败 ret=%d", sent);
         return ESP_FAIL;
@@ -192,14 +188,8 @@ void WS::ws_event_handler(void *handler_args, esp_event_base_t base,
     case WEBSOCKET_EVENT_DATA:
         /* 任何收到数据(含 PONG/心跳)都刷新活跃时间,用于死连接检测 */
         self->m_last_rx_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        if (data != nullptr) {
-            /* 无条件打印:确认服务器数据到底到没到,以及 opcode 是否正常 */
-            ESP_LOGI(TAG, "DATA op=%d len=%d", data->op_code, data->data_len);
-            if (data->op_code == WS_TRANSPORT_OPCODES_TEXT) {
-                self->handle_data(data->data_ptr, data->data_len);
-            } else {
-                ESP_LOGW(TAG, "非TEXT帧 op=%d len=%d(正常应是 ping=9/pong=10)", data->op_code, data->data_len);
-            }
+        if (data != nullptr && data->op_code == WS_TRANSPORT_OPCODES_TEXT) {
+            self->handle_data(data->data_ptr, data->data_len);
         }
         /* PING/PONG 由 esp_websocket_client 内部自动处理,无需干预 */
         break;
@@ -274,7 +264,6 @@ void WS::handle_data(const char *payload, int len)
 /* 解析单条完整 JSON 消息并分发 */
 void WS::dispatch_msg(const char *msg, int len)
 {
-    ESP_LOGD(TAG, "dispatch len=%d: %s", len, msg);
     cJSON *root = cJSON_Parse(msg);
     if (root == NULL) {
         ESP_LOGW(TAG, "JSON 解析失败: %s", msg);
@@ -286,7 +275,9 @@ void WS::dispatch_msg(const char *msg, int len)
         cJSON_Delete(root);
         return;
     }
-    const char *type = type_item->valuestring;
+    /* 先复制 type 到本地,再删 root(避免悬空指针) */
+    char type[32];
+    strlcpy(type, type_item->valuestring, sizeof(type));
     cJSON_Delete(root);
 
     /* 通用帧由 WS 自己处理 */

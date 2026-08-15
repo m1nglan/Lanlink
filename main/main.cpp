@@ -123,8 +123,7 @@ static void ws_task(void *arg)
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         if (now_ms - last_ping_ms >= (uint32_t)(WS_PING_INTERVAL_SEC * 1000)) {
             last_ping_ms = now_ms;
-            esp_err_t ping_ret = ws.send_ping(WS_SEND_TIMEOUT_MS);
-            ESP_LOGI(TAG, "ping 发送: %s", esp_err_to_name(ping_ret));
+            ws.send_ping(WS_SEND_TIMEOUT_MS);
         }
 
         /* 1. 录音开始(RECORDING)且未发 start → 发 start(成功才置位,失败重试) */
