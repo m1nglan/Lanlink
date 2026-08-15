@@ -49,14 +49,18 @@ static volatile asr_state_t s_asr_state = ASR_STATE_IDLE;   /* 共享录音状�
 static StreamBufferHandle_t s_audio_buf;                     /* 音频流缓冲(i2s→ws) */
 
 /* LLM 转发状态(跨任务,volatile):
- *   s_final_text      本轮语音识别出的 final 完整文本(待转发给 LLM)
- *   s_llm_pending     有文本待转发给 LLM(收到 final 时置位,ws_task 消费)
- *   s_reply_received  已收到 LLM 的完整回复(reply 消息置位)
- *   s_llm_busy        LLM 转发流程进行中(切服务/等回复),期间禁止开始录音 */
+ *   s_final_text        本轮语音识别出的 final 完整文本(待转发给 LLM)
+ *   s_llm_pending       有文本待转发给 LLM(收到 final 时置位,ws_task 消费)
+ *   s_reply_received    已收到 LLM 的完整回复(reply 消息置位)
+ *   s_llm_busy          LLM 转发流程进行中(切服务/等回复),期间禁止开始录音
+ *   s_llm_service       当前 LLM 转发服务("openclaw"/"llm"),IO8 按键切换
+ *   s_svc_switch_pending IO8 按下待切换标志(button_task 置位,ws_task 消费) */
 static char s_final_text[512] = {0};
 static volatile bool s_llm_pending = false;
 static volatile bool s_reply_received = false;
 static volatile bool s_llm_busy = false;
+static const char *s_llm_service = "openclaw";   /* 默认 OpenClaw(明岚) */
+static volatile bool s_svc_switch_pending = false;
 
 /* 结果回调(ws 事件上下文,由 RtAsr 调用):
  *   收到语音识别 final → 录音状态机回 IDLE, 保存文本并置 LLM 转发标志 */
@@ -84,16 +88,32 @@ static void on_llm_reply(const char *text, void *ctx)
 /* 按住确认时长: 超过该时长才真正开始录音会话(防误触) */
 #define BTN_HOLD_MS (500)
 
-/* 按键任务(核1): Button 驱动 + 录音状态机
- * 作用: 检测按键, 驱动 s_asr_state 在 IDLE/RECORDING/WAITING 间切换 */
+/* 第二按键(IO8): LLM/OpenClaw 服务切换 */
+#define BTN_SVC_PIN GPIO_NUM_8
+
+/* 按键任务(核1): Button 驱动 + 录音状态机 + 服务切换按键
+ * 作用:
+ *   - IO10 长按 0.5s: 开始/结束录音(驱动 s_asr_state)
+ *   - IO8  按下: 切换 LLM/OpenClaw 服务(置 s_svc_switch_pending,由 ws_task 消费) */
 static void button_task(void *arg)
 {
     (void)arg;
-    Button btn(BTN_PIN);
+    Button btn(BTN_PIN);       /* IO10: 录音键 */
+    Button btn_svc(BTN_SVC_PIN);  /* IO8: 服务切换键 */
     ESP_ERROR_CHECK(btn.init());
+    ESP_ERROR_CHECK(btn_svc.init());
+
+    bool prev_svc_pressed = false;   /* IO8 上一次的按下状态,用于"按下沿"检测 */
 
     while (1) {
         bool pressed = btn.is_pressed();   /* 阻塞消抖 ~50ms */
+        bool svc_pressed = btn_svc.is_pressed();   /* 阻塞消抖 ~50ms */
+
+        /* IO8 服务切换: 只在"未按下→按下"的边沿触发一次,长按不重复切换 */
+        if (svc_pressed && !prev_svc_pressed) {
+            s_svc_switch_pending = true;   /* 置待切换标志(ws_task 消费) */
+        }
+        prev_svc_pressed = svc_pressed;    /* 记录本次状态,供下次边沿判断 */
 
         /* 条件: 按下 + 空闲 + LLM 未忙 → 尝试开始录音 */
         if (pressed && s_asr_state == ASR_STATE_IDLE && !s_llm_busy) {
@@ -203,8 +223,23 @@ static void ws_task(void *arg)
             ws.send_ping(WS_SEND_TIMEOUT_MS);
         }
 
-        /* 步骤 1: 录音开始(RECORDING)且未发 start → 发 start(成功才置位,失败重试) */
+        /* 步骤 0.6: IO8 服务切换。LLM 阶段机空闲时才能切(避免打断正在进行的 LLM 会话)。
+         * 切到 "llm" 则下次转发用 DeepSeek, 切到 "openclaw" 则用明岚。 */
+        if (s_svc_switch_pending && llm_stage == LLM_IDLE && ws.is_connected()) {
+            s_llm_service = (strcmp(s_llm_service, "openclaw") == 0) ? "llm" : "openclaw";
+            ws.set_service(s_llm_service);   /* 通知 WS: partial 分流用当前服务 */
+            llm.switch_service(s_llm_service, WS_SEND_TIMEOUT_MS);
+            ESP_LOGI(TAG, "切换到 %s", s_llm_service);
+            s_svc_switch_pending = false;
+        }
+
+        /* 步骤 1: 录音开始(RECORDING)且未发 start → 先确保 text 服务,再发 start。
+         * 注意: 录音必须在 text 服务下进行。之前可能被 IO8 切到 llm/openclaw, 或 LLM 转发后
+         * 服务器没成功切回 text。这里无条件发一次 switch_service("text")(幂等), 确保服务器在 text。 */
         if (s_asr_state == ASR_STATE_RECORDING && !started) {
+            ws.set_service("text");
+            asr.switch_service("text", WS_SEND_TIMEOUT_MS);
+            vTaskDelay(pdMS_TO_TICKS(300));   /* 等服务器完成 svc 切换并回 svc_ok */
             if (asr.start(WS_SEND_TIMEOUT_MS) == ESP_OK) {
                 started = true;
                 end_sent = false;
@@ -249,15 +284,15 @@ static void ws_task(void *arg)
         /* 步骤 4.5: LLM 转发阶段机(语音识别出的文本自动发给 OpenClaw)。
          * 非阻塞实现: 每个阶段只在主循环的一轮里做一小步,靠阶段状态推进。 */
         if (llm_stage == LLM_IDLE && s_llm_pending && ws.is_connected()) {
-            /* LLM_IDLE + 有待转发文本 → 进入切换服务阶段 */
+            /* LLM_IDLE + 有待转发文本 → 进入切换服务阶段, 发到当前选中的服务 */
             llm_stage = LLM_SWITCHING;
             llm_stage_ms = (uint32_t)(esp_timer_get_time() / 1000);
             s_reply_received = false;    /* 复位"已回复"标志 */
             s_llm_busy = true;           /* 标记 LLM 忙,禁止按键开始录音 */
             llm.reset_stream();          /* 清空流式累积 buffer */
-            ws.set_service("openclaw");  /* 通知 WS: 当前在 openclaw 服务(partial 分流) */
-            ESP_LOGI(TAG, "切换到 OpenClaw...");
-            llm.switch_service("openclaw", WS_SEND_TIMEOUT_MS);
+            ws.set_service(s_llm_service);  /* 通知 WS: partial 分流用当前服务 */
+            ESP_LOGI(TAG, "发送给 %s ...", s_llm_service);
+            llm.switch_service(s_llm_service, WS_SEND_TIMEOUT_MS);
         }
         if (llm_stage == LLM_SWITCHING) {
             /* 等 300ms 让服务器完成 svc 切换,再发 chat */
