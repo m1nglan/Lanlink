@@ -22,6 +22,7 @@ esp_err_t Button::init(void)
     }
 
     m_pressed = is_pressed();
+    m_last_active = m_pressed;   /* 沿检测的初始状态: 记录当前按下状态 */
     ESP_LOGI(TAG, "button GPIO%d init OK (active level=%d, debounce ~%dms)",
              m_pin, m_active_level, BTN_DEBOUNCE_MS * BTN_DEBOUNCE_N);
     return ESP_OK;
@@ -48,4 +49,17 @@ bool Button::is_pressed(void)
 {
     m_pressed = (read_level() == m_active_level);
     return m_pressed;
+}
+
+bool Button::is_pressed_edge(void)
+{
+    /* 单次读取 GPIO 电平(不消抖重读,避免长按期间重读抖动误判边沿)。
+     * 若与 active_level 相同 = 当前按下。 */
+    bool now_active = (gpio_get_level(m_pin) == m_active_level);
+
+    /* 按下沿: 上一次未按下, 本次按下 → 触发一次 */
+    bool edge = (now_active && !m_last_active);
+    m_last_active = now_active;   /* 记录本次状态,供下次判断 */
+
+    return edge;
 }
