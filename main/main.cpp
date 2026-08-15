@@ -3,6 +3,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
@@ -10,6 +11,7 @@
 #include "drivers/wifi.hpp"
 #include "drivers/button.hpp"
 #include "drivers/i2s_mic.hpp"
+#include "drivers/ws.hpp"
 #include "drivers/rtasr.hpp"
 
 static const char *TAG = "Main";
@@ -85,29 +87,49 @@ static void i2s_task(void *arg)
 static void ws_task(void *arg)
 {
     (void)arg;
+    WS &ws = WS::get();
     RtAsr asr;
     asr.set_result_callback(on_result, NULL);
+    asr.attach(ws);   /* 绑定共享连接 */
 
     bool started = false;   /* 本轮是否已发 start */
     bool end_sent = false;  /* 本轮是否已发 end */
+    uint32_t last_ping_ms = 0;  /* 上次发应用层 ping 的时间 */
+    uint32_t end_time_ms = 0;   /* 上次发 end 的时间(用于 WAITING 超时兜底) */
+    const uint32_t WAIT_FINAL_TIMEOUT_MS = 10000;  /* 发 end 后最多等 10s 的 final */
 
     while (1) {
-        /* 0. 确保连接(断线重连) */
-        if (!asr.is_connected()) {
-            asr.deinit();
+        /* 0. 确保连接: 未连接 或 已死(超时无数据)→ 重连 */
+        if (!ws.is_connected() || ws.is_stale()) {
+            ws.deinit();
             started = false;
             end_sent = false;
             xStreamBufferReset(s_audio_buf);
+            /* 死连接等待,避免频繁重连 */
+            if (ws.is_stale()) {
+                ESP_LOGW(TAG, "连接超时无数据,重连中...");
+            }
             vTaskDelay(pdMS_TO_TICKS(1000));
-            if (asr.init() == ESP_OK) {
+            if (ws.init() == ESP_OK) {
+                asr.attach(ws);   /* 连接重建后重新绑定 */
                 ESP_LOGI(TAG, "网关连接成功(长连接)");
+                /* 切到 text 服务(服务器要求连接后显式切换,否则不处理 start/音频) */
+                asr.switch_service("text", WS_SEND_TIMEOUT_MS);
             }
             continue;
         }
 
+        /* 0.5 定时发应用层 ping 保活(服务器回 pong,刷新 is_stale 判断) */
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now_ms - last_ping_ms >= (uint32_t)(WS_PING_INTERVAL_SEC * 1000)) {
+            last_ping_ms = now_ms;
+            esp_err_t ping_ret = ws.send_ping(WS_SEND_TIMEOUT_MS);
+            ESP_LOGI(TAG, "ping 发送: %s", esp_err_to_name(ping_ret));
+        }
+
         /* 1. 录音开始(RECORDING)且未发 start → 发 start(成功才置位,失败重试) */
         if (s_asr_state == ASR_STATE_RECORDING && !started) {
-            if (asr.send_start(RTASR_SEND_TIMEOUT_MS) == ESP_OK) {
+            if (asr.start(WS_SEND_TIMEOUT_MS) == ESP_OK) {
                 started = true;
                 end_sent = false;
                 ESP_LOGI(TAG, "已发送 start");
@@ -121,21 +143,22 @@ static void ws_task(void *arg)
             uint8_t data[I2S_MIC_FRAME_BYTES];
             size_t n = xStreamBufferReceive(s_audio_buf, data, sizeof(data), pdMS_TO_TICKS(20));
             if (n > 0) {
-                asr.send_audio(data, n, RTASR_SEND_TIMEOUT_MS);
+                asr.send_audio(data, n, WS_SEND_TIMEOUT_MS);
             }
         }
 
         /* 3. 录音结束(WAITING)且未发 end → 排空 buffer 后发 end */
         if (started && s_asr_state == ASR_STATE_WAITING && !end_sent) {
             if (xStreamBufferIsEmpty(s_audio_buf)) {
-                asr.send_end(RTASR_SEND_TIMEOUT_MS);
+                asr.end(WS_SEND_TIMEOUT_MS);
                 end_sent = true;
+                end_time_ms = (uint32_t)(esp_timer_get_time() / 1000);
                 ESP_LOGI(TAG, "已发送 end");
             } else {
                 uint8_t data[I2S_MIC_FRAME_BYTES];
                 size_t n = xStreamBufferReceive(s_audio_buf, data, sizeof(data), pdMS_TO_TICKS(20));
                 if (n > 0) {
-                    asr.send_audio(data, n, RTASR_SEND_TIMEOUT_MS);
+                    asr.send_audio(data, n, WS_SEND_TIMEOUT_MS);
                 }
             }
         }
@@ -144,6 +167,18 @@ static void ws_task(void *arg)
         if (started && s_asr_state == ASR_STATE_IDLE) {
             started = false;
             end_sent = false;
+        }
+
+        /* 4.5 WAITING 超时兜底:发 end 后 WAIT_FINAL_TIMEOUT_MS 没收到 final → 强制回 IDLE,
+         * 避免状态机永久卡死在 WAITING 导致后续按键失效 */
+        if (s_asr_state == ASR_STATE_WAITING && end_sent && end_time_ms != 0) {
+            if ((uint32_t)(esp_timer_get_time() / 1000) - end_time_ms > WAIT_FINAL_TIMEOUT_MS) {
+                ESP_LOGW(TAG, "等待 final 超时,强制回空闲");
+                s_asr_state = ASR_STATE_IDLE;
+                started = false;
+                end_sent = false;
+                end_time_ms = 0;
+            }
         }
 
         /* 5. 非录音状态让出 CPU(录音中由 xStreamBufferReceive 20ms 超时让出) */

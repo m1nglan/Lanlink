@@ -1,83 +1,73 @@
-# LanLink 语音网关 接口文档（V0.2 长连接版）
+# LanLink 统一服务网关 接口文档（V1.1 应用层切换）
 
-> 服务器: 39.104.84.177 · 端口: 18888 · 2026-08-14 更新
-> 功能: 板子实时语音 -> 讯飞语音听写 -> 识别文本回传
+> 服务器: 39.104.84.177 · 端口: 18888 · 2026-08-15 更新
+> **一条长连接 + 应用层切换**：板子只需一个固定 URL
 
 ---
 
-## 1. 连接地址
+## 1. 统一入口（固定一个URL）
 
 ```
-ws://39.104.84.177:18888/iat?token=***
+ws://39.104.84.177:18888/?token=***
 ```
 
-- 协议: WebSocket
-- 鉴权: URL 参数 `token`
-- 音频格式: **PCM, 16kHz, 16bit, 单声道**（与 INMP441 驱动输出一致）
-- **连接建立后长期保持**，可跑任意多轮识别
+连接建立后，用切换消息在三个服务间切换：
 
----
-
-## 2. 一轮识别的完整流程
-
-```
-板子                          网关
- │── {"type":"start"} ────────→│   开始触发器（开启讯飞会话）
- │── [PCM二进制帧] ───────────→│   音频数据（中间随便发，任意段数）
- │── [PCM二进制帧] ───────────→│
- │── ...                       │
- │── {"type":"end"} ──────────→│   结束触发器（结束本轮）
- │←── {"type":"partial", ...} ─│   中间结果（可选，实时）
- │←── {"type":"final", "text"} ─│   最终结果（本轮结束）
- │                              │
- │── {"type":"start"} ────────→│   下一轮（连接不变）
- │── ...                       │
+```json
+{"type":"svc","service":"text"}       → {"type":"svc_ok","service":"text"}
+{"type":"svc","service":"llm"}        → {"type":"svc_ok","service":"llm"}
+{"type":"svc","service":"openclaw"}   → {"type":"svc_ok","service":"openclaw"}
 ```
 
----
+| service | 功能 |
+|---|---|
+| `text` | 语音听写（讯飞, 流式） |
+| `llm` | 大模型对话（DeepSeek, 网关维护上下文） |
+| `openclaw` | 明岚对话（转发 OpenClaw, 接 main 会话） |
 
-## 3. 消息定义
-
-### 上行（板子 -> 网关）
-
-| 消息 | 格式 | 说明 |
-|---|---|---|
-| 开始帧 | `{"type":"start"}` | 开始一轮识别；若上一轮未结束会被丢弃 |
-| 音频帧 | 二进制 PCM | 1280B/帧（40ms），帧间建议40ms间隔 |
-| 结束帧 | `{"type":"end"}` | 结束本轮，等待 final |
-| 心跳 | `{"type":"ping"}` | 可选，服务器回 pong |
-
-### 下行（网关 -> 板子）
-
-| 消息 | 格式 | 说明 |
-|---|---|---|
-| 中间结果 | `{"type":"partial","text":"..."}` | 实时识别片段 |
-| 最终结果 | `{"type":"final","text":"..."}` | 本轮完整文本 |
-| 错误 | `{"type":"error","code":N,"message":"..."}` | code: 1=讯飞错误 3=音频超55s |
-| 心跳响应 | `{"type":"pong"}` | ping 的应答 |
+切换时自动清理上一服务状态（语音会话/对话历史）。默认服务 = text。
 
 ---
 
-## 4. 注意事项
+## 2. type=text 语音听写
 
-- **start 之前发音频会被丢弃**（需要先 start）
-- 单轮音频最长 **55 秒**，超限报 error(code=3) 并强制结束本轮
-- 收到 `final` 后本轮结束，可立即再 `start` 下一轮
-- 断线重连 = 新连接，之前的会话丢弃
-- 长时间不活动不影响连接（服务器不主动断）
+```
+板子 → {"type":"start"}           开始（触发器）
+板子 → [PCM二进制帧] 任意段数      音频（1280B/帧=40ms）
+网关 → {"type":"partial","text"}  流式中间结果
+板子 → {"type":"end"}             结束（触发器）
+网关 → {"type":"final","text"}    最终结果
+```
+
+- start 前发音频会被丢弃；单轮最长55秒；final后可立即再 start
+
+## 3. type=llm / type=openclaw 对话
+
+```
+板子 → {"type":"chat","content":"记作业：数学第3页"}
+网关 → {"type":"reply","content":"好的，已记下"}
+板子 → {"type":"clear"}           清空上下文（llm）
+```
+
+- llm: DeepSeek，网关维护最近20条消息+system提示词
+- openclaw: 转发明岚（openclaw/default），会话=main（主子微信可见）
+
+## 4. 通用
+
+- 心跳: `{"type":"ping"}` → `{"type":"pong"}`
+- 错误: `{"type":"error","code":N,"message":"..."}`（1=讯飞 2=llm/openclaw 3=超55s 4=未知服务）
 
 ---
 
-## 5. 部署信息
+## 5. 部署
 
 | 项 | 值 |
 |---|---|
-| 代码路径 | `/home/m1nglan/lanlink-gateway/` |
-| 启动 | `bash start.sh`（或 `setsid nohup python3 server.py &`） |
-| 日志 | `gateway.log` |
-| 单轮测试 | `python3 test_client.py test_audio.pcm` |
-| 多轮测试 | `python3 test_longconn.py` |
+| 代码 | `/home/m1nglan/lanlink-gateway/` |
+| 密钥 | `config.json`（chmod 600, **勿提交 git**） |
+| 启动 | `bash start.sh` |
+| 测试 | `test_switch.py`（一条连接三服务切换） |
 
-## 6. 测试结果（2026-08-14）
+## 6. 测试记录（2026-08-15）
 
-长连接多轮测试 ✅：连接保持 → ping/pong → 两轮识别（start→音频→end→final）→ 连接仍存活
+一条连接: text识别 → 切llm对话(上下文记忆) → 切回text再识别 ✅
