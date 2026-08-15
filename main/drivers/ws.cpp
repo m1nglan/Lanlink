@@ -121,6 +121,17 @@ void WS::set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx)
     ESP_LOGI(TAG, "注册 handler: type=%s", type_key);
 }
 
+void WS::set_partial_handler(const char *service, ws_msg_handler_t cb, void *ctx)
+{
+    if (strcmp(service, "text") == 0) {
+        m_partial_text_cb = cb;
+        m_partial_text_ctx = ctx;
+    } else {
+        m_partial_chat_cb = cb;
+        m_partial_chat_ctx = ctx;
+    }
+}
+
 esp_err_t WS::send_text(const char *text, uint32_t timeout_ms)
 {
     if (m_ws == NULL || !m_connected) {
@@ -291,6 +302,17 @@ void WS::dispatch_msg(const char *msg, int len)
     }
     if (strcmp(type, "pong") == 0) {
         ESP_LOGD(TAG, "pong");
+        return;
+    }
+
+    /* partial 按当前服务分流: text=语音增量, llm/openclaw=对话流式 */
+    if (strcmp(type, "partial") == 0) {
+        bool is_chat = (strcmp(m_service, "llm") == 0) || (strcmp(m_service, "openclaw") == 0);
+        ws_msg_handler_t h = is_chat ? m_partial_chat_cb : m_partial_text_cb;
+        void *hctx = is_chat ? m_partial_chat_ctx : m_partial_text_ctx;
+        if (h != NULL) {
+            h(msg, len, hctx);
+        }
         return;
     }
 

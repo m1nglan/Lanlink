@@ -38,7 +38,9 @@ private:
     /* 由 WS 按 type 分发的处理器(静态,签名 ws_msg_handler_t) */
     static void handle_partial(const char *payload, int len, void *ctx);
     static void handle_final(const char *payload, int len, void *ctx);
+    static void handle_revise(const char *payload, int len, void *ctx);  /* 语音修正 */
     void accumulate(const char *text, bool is_final);
+    void revise(const char *text);   /* 整体替换 buffer 并重打印(修正) */
 
     WS *m_ws = nullptr;
     rtasr_result_cb_t m_cb = NULL;

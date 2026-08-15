@@ -13,7 +13,9 @@
 #define WS_CONNECT_TIMEOUT_MS (15000)      /*!< 连接超时 */
 #define WS_SEND_TIMEOUT_MS    (1000)       /*!< 发送超时 */
 #define WS_PING_INTERVAL_SEC  (20)         /*!< 板子主动 PING 保活间隔 */
-#define WS_STALE_TIMEOUT_MS   (45000)      /*!< 超过该时长未收到任何数据→判定死连接,重连 */
+#define WS_STALE_TIMEOUT_MS   (130000)     /*!< 超过该时长未收到任何数据→判定死连接,重连。
+                                            OpenClaw 工具调用空窗可达几十秒,阈值须大于服务器120s ping,
+                                            避免 LLM 空窗期误判断连。 */
 
 /* 消息处理器: 收到 TEXT 帧且 type 匹配时调用
  * payload: null 终止的完整 JSON 字符串(WS 已补 \0); len: 原始长度; ctx: set_handler 传入 */
@@ -47,6 +49,13 @@ public:
     /*! 注册消息处理器: 收到 TEXT 帧且 JSON 里 type == type_key 时调用 cb(payload,len,ctx) */
     void set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx);
 
+    /*! 注册 partial 处理器(按服务区分): "text"=语音增量, "llm"=对话流式 */
+    void set_partial_handler(const char *service, ws_msg_handler_t cb, void *ctx);
+
+    /*! 记录当前服务(用于区分 partial 属于语音还是对话流式) */
+    void set_service(const char *service) { m_service = service; }
+    const char *get_service(void) const { return m_service; }
+
     /*! 发送文本帧 */
     esp_err_t send_text(const char *text, uint32_t timeout_ms);
     /*! 发送二进制帧 */
@@ -73,9 +82,16 @@ private:
     void *m_ctxs[MAX_HANDLERS] = {};
     int m_handler_count = 0;
 
+    /* partial 处理器(按服务): "text"→RtAsr, "llm"/"openclaw"→Llm */
+    ws_msg_handler_t m_partial_text_cb = NULL;
+    void *m_partial_text_ctx = NULL;
+    ws_msg_handler_t m_partial_chat_cb = NULL;
+    void *m_partial_chat_ctx = NULL;
+
     esp_websocket_client_handle_t m_ws = NULL;
     volatile bool m_connected = false;
     uint32_t m_last_rx_ms = 0;   /*!< 最后收到数据的时间(ms,esp_timer) */
+    const char *m_service = "text";  /*!< 当前服务(text/llm/openclaw/echo) */
 
     /* 接收累积缓冲: 处理 websocket 粘包/分帧 */
     static const int RX_BUF_SIZE = 4096;

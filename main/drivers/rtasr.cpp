@@ -14,9 +14,10 @@ static char s_result[1024];
 void RtAsr::attach(WS &ws)
 {
     m_ws = &ws;
-    /* 注册 text 服务的结果帧处理器 */
-    ws.set_handler("partial", &RtAsr::handle_partial, this);
+    /* 注册 text 服务的处理器: partial(语音增量)→set_partial_handler, final/revise→普通 handler */
+    ws.set_partial_handler("text", &RtAsr::handle_partial, this);
     ws.set_handler("final", &RtAsr::handle_final, this);
+    ws.set_handler("revise", &RtAsr::handle_revise, this);
     ESP_LOGI(TAG, "RtAsr 已绑定 WS");
 }
 
@@ -83,6 +84,26 @@ void RtAsr::handle_partial(const char *payload, int len, void *ctx)
     cJSON_Delete(root);
 }
 
+/* 语音修正: 服务器发完整当前文本,整体替换 buffer(修正错字),不回 IDLE/不触发完成 */
+void RtAsr::handle_revise(const char *payload, int len, void *ctx)
+{
+    (void)len;
+    RtAsr *self = static_cast<RtAsr *>(ctx);
+    if (self == nullptr) {
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(payload);
+    if (root == NULL) {
+        return;
+    }
+    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
+    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
+        self->revise(text_item->valuestring);
+    }
+    cJSON_Delete(root);
+}
+
 void RtAsr::handle_final(const char *payload, int len, void *ctx)
 {
     RtAsr *self = static_cast<RtAsr *>(ctx);
@@ -101,20 +122,25 @@ void RtAsr::handle_final(const char *payload, int len, void *ctx)
     cJSON_Delete(root);
 }
 
+/* 语音修正: 整体替换 buffer,换行重打整条(标记修正),不触发完成回调 */
+void RtAsr::revise(const char *text)
+{
+    strlcpy(s_result, text, sizeof(s_result));
+    printf("\n[修正] %s", s_result);
+    fflush(stdout);
+}
+
 void RtAsr::accumulate(const char *text, bool is_final)
 {
     /* 服务器增量返回: partial 只回新字符,追加到累积 buffer; final 回完整文本,覆盖 */
     if (is_final) {
         strlcpy(s_result, text, sizeof(s_result));
+        /* 完整结果: 换行定格 */
+        printf("\n[识别] %s\n", s_result);
     } else {
         strlcat(s_result, text, sizeof(s_result));
-    }
-
-    /* 中间结果同一行实时刷新(\r 回到行首覆盖),最终结果换行 */
-    if (is_final) {
-        printf("\r识别结果: %s\n", s_result);
-    } else {
-        printf("\r识别中: %s    ", s_result);
+        /* 流式: 只打印新增字符,不换行,字自然从行尾冒出来 */
+        printf("%s", text);
     }
     fflush(stdout);
 
