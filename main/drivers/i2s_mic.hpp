@@ -26,9 +26,9 @@
 
 /* ------------------ 硬件接线参数（按实际连线修改） ------------------ */
 #define I2S_MIC_PORT_NUM            (I2S_NUM_0)  /*!< I2S 控制器编号 */
-#define I2S_MIC_BCLK_PIN            (GPIO_NUM_5) /*!< INMP441 SCK  -> ESP32 BCLK */
-#define I2S_MIC_WS_PIN              (GPIO_NUM_4) /*!< INMP441 WS   -> ESP32 WS(LRCK) */
-#define I2S_MIC_DIN_PIN             (GPIO_NUM_8) /*!< INMP441 SD   -> ESP32 DIN */
+#define I2S_MIC_BCLK_PIN            (GPIO_NUM_11) /*!< INMP441 SCK  -> ESP32 BCLK */
+#define I2S_MIC_WS_PIN              (GPIO_NUM_12) /*!< INMP441 WS   -> ESP32 WS(LRCK) */
+#define I2S_MIC_DIN_PIN             (GPIO_NUM_13) /*!< INMP441 SD   -> ESP32 DIN */
 #define I2S_MIC_DMA_BUF_COUNT       (8)          /*!< DMA 描述符数量 */
 #define I2S_MIC_DMA_FRAME_NUM       (256)        /*!< 每个 DMA buffer 的帧数(32bit 槽) */
 

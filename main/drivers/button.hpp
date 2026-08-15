@@ -6,8 +6,8 @@
 #include "driver/gpio.h"
 
 /* ------------------ 默认参数(按实际修改) ------------------ */
-#define BTN_ACTIVE_LEVEL    (1)                  /*!< 默认按下电平:1=按下为高(外部下拉),0=按下为低(上拉) */
-#define BTN_PULL_UP_EN      (GPIO_PULLUP_DISABLE)   /*!< 内部上拉:外部下拉接法用 DISABLE */
+#define BTN_ACTIVE_LEVEL    (0)                  /*!< 默认按下电平:1=按下为高(外部下拉),0=按下为低(上拉) */
+#define BTN_PULL_UP_EN      (GPIO_PULLUP_ENABLE)   /*!< 内部上拉:外部下拉接法用 DISABLE */
 #define BTN_PULL_DOWN_EN    (GPIO_PULLDOWN_DISABLE) /*!< 内部下拉:外部下拉接法用 DISABLE */
 #define BTN_DEBOUNCE_MS     (10)                 /*!< 采样间隔(≥10ms,CONFIG_FREERTOS_HZ=100 时 1 tick=10ms) */
 #define BTN_DEBOUNCE_N      (5)                  /*!< 稳定采样次数(总消抖约 50ms) */
