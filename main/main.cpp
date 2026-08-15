@@ -44,6 +44,9 @@ static void on_result(const char *text, bool is_final, void *ctx)
     }
 }
 
+/* 按住确认时长: 超过该时长才真正开始录音会话(防误触) */
+#define BTN_HOLD_MS (500)
+
 /* 按键任务(核1): Button 驱动 + 状态机 */
 static void button_task(void *arg)
 {
@@ -55,8 +58,19 @@ static void button_task(void *arg)
         bool pressed = btn.is_pressed();   /* 阻塞消抖 ~50ms */
 
         if (pressed && s_asr_state == ASR_STATE_IDLE) {
-            s_asr_state = ASR_STATE_RECORDING;
-            ESP_LOGI(TAG, "开始录音");
+            /* 按住确认: 保持 0.5s 才真正开始,短按忽略(防误触) */
+            uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            bool confirmed = false;
+            while (btn.is_pressed()) {
+                if ((uint32_t)(esp_timer_get_time() / 1000) - start_ms >= BTN_HOLD_MS) {
+                    confirmed = true;
+                    break;
+                }
+            }
+            if (confirmed) {
+                s_asr_state = ASR_STATE_RECORDING;
+                ESP_LOGI(TAG, "开始录音");
+            }
         } else if (!pressed && s_asr_state == ASR_STATE_RECORDING) {
             s_asr_state = ASR_STATE_WAITING;
             ESP_LOGI(TAG, "\n停止录音,等待结果");
