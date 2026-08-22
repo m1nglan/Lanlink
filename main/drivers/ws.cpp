@@ -11,6 +11,9 @@
 
 static const char *TAG = "ws";
 
+/* 接收累积缓冲: 放 PSRAM(段属性加在定义上)。WS 是单例,静态成员全局仅一份。 */
+EXT_RAM_BSS_ATTR char WS::m_rx_buf[WS::RX_BUF_SIZE];
+
 WS& WS::get(void)
 {
     static WS instance;

@@ -106,12 +106,18 @@ void AppFsm::tick(void)
     }
 
     /* 步骤 0.6: IO8 服务切换。LLM 阶段机空闲时才能切(避免打断 LLM 会话) */
-    if (m_svc_switch_pending && m_llm_stage == LLM_IDLE && ws.is_connected()) {
-        m_llm_service = (strcmp(m_llm_service, "openclaw") == 0) ? "llm" : "openclaw";
-        ws.set_service(m_llm_service);
-        llm.switch_service(m_llm_service, WS_SEND_TIMEOUT_MS);
-        ESP_LOGI(TAG, "切换到 %s", m_llm_service);
-        m_svc_switch_pending = false;
+    if (m_svc_switch_pending) {
+        if (m_llm_stage != LLM_IDLE) {
+            ESP_LOGW(TAG, "切换挂起: LLM 阶段机非 IDLE (stage=%d), 等回 IDLE", (int)m_llm_stage);
+        } else if (!ws.is_connected()) {
+            ESP_LOGW(TAG, "切换挂起: WS 未连接");
+        } else {
+            m_llm_service = (strcmp(m_llm_service, "openclaw") == 0) ? "llm" : "openclaw";
+            ws.set_service(m_llm_service);
+            llm.switch_service(m_llm_service, WS_SEND_TIMEOUT_MS);
+            ESP_LOGI(TAG, "切换到 %s", m_llm_service);
+            m_svc_switch_pending = false;
+        }
     }
 
     /* 步骤 1: 录音开始(RECORDING)且未发 start → 先确保 text 服务,再发 start */

@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "cJSON.h"
 
 static const char *TAG = "rtasr";
@@ -16,8 +17,9 @@ static const char *TAG = "rtasr";
  *   final(语音完成)   → handle_final(覆盖 buffer + 触发完成回调)
  * ================================================================ */
 
-/* 累积识别文字 buffer: partial 追加, revise/final 覆盖, 每轮 start 时清零 */
-static char s_result[1024];
+/* 累积识别文字 buffer: partial 追加, revise/final 覆盖, 每轮 start 时清零。
+ * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM(文字低频访问,不影响速度) */
+EXT_RAM_BSS_ATTR static char s_result[1024];
 
 void RtAsr::attach(WS &ws)
 {

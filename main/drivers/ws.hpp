@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "esp_attr.h"
 #include "esp_websocket_client.h"
 
 /* ============ 统一服务网关(长连接) 参数 ============ */
@@ -93,8 +94,10 @@ private:
     uint32_t m_last_rx_ms = 0;   /*!< 最后收到数据的时间(ms,esp_timer) */
     const char *m_service = "text";  /*!< 当前服务(text/llm/openclaw/echo) */
 
-    /* 接收累积缓冲: 处理 websocket 粘包/分帧 */
-    static const int RX_BUF_SIZE = 4096;
-    char m_rx_buf[RX_BUF_SIZE];
+    /* 接收累积缓冲: 处理 websocket 粘包/分帧。
+     * 段属性(EXT_RAM_BSS_ATTR)只允许静态存储期变量,故声明为 static 成员,
+     * 存储定义在 ws.cpp(WS 是单例,仅一份)。8KB 防粘包数据超长溢出。 */
+    static const int RX_BUF_SIZE = 8192;
+    static char m_rx_buf[RX_BUF_SIZE];
     int m_rx_len = 0;
 };

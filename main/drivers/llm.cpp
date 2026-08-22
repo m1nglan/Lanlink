@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "cJSON.h"
 
 static const char *TAG = "llm";
@@ -15,8 +16,9 @@ static const char *TAG = "llm";
  * 注: partial 与语音识别的 partial 同名,由 WS 按当前服务路由(RtAsr↔Llm)。
  * ================================================================ */
 
-/* 对话流式累积 buffer: partial(流式字)追加, reply(完整)覆盖 */
-static char s_stream[1024];
+/* 对话流式累积 buffer: partial(流式字)追加, reply(完整)覆盖。
+ * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM(文字低频访问,不影响速度) */
+EXT_RAM_BSS_ATTR static char s_stream[1024];
 
 void Llm::attach(WS &ws)
 {

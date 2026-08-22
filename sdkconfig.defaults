@@ -7,15 +7,39 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
-# --- 分区表: 单应用大分区 (factory = 1500K) ---
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
-CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
+# --- 分区表: 自定义, 单应用 factory = 6MB (容纳 LVGL UI + 中文字库, 16MB flash) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_custom.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_custom.csv"
 
-# --- PSRAM: 8MB Octal @80MHz (n16r8) ---
+# --- PSRAM: 8MB Octal @40MHz (n16r8) ---
+# 注: 80MHz 下实测 PSRAM 内存测试位翻转失败(20156 写失败),
+#     也是之前"音频放 PSRAM 错字"的根因 → 降频 40MHz 稳时序
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# --- 允许 .bss 段放到 PSRAM(EXT_RAM_BSS_ATTR), 省内部 SRAM ---
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
 # --- main 任务栈增大 (修复根因: I2sMic 的 m_raw 2560B + main 的 pcm 1280B 超过默认 3584B 栈导致溢出) ---
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- LVGL 9.5 (SquareLine 1.6.2 导出) ---
+# 不提供 lv_conf.h, LVGL 配置全走 Kconfig (menuconfig → Component config → LVGL configuration)
+CONFIG_LV_CONF_SKIP=y
+# ui.c 顶部 #error 要求 16bit (Kconfig 默认就是16, 显式保险)
+CONFIG_LV_COLOR_DEPTH_16=y
+# 用标准 malloc (CONFIG_SPIRAM_USE_MALLOC 下大块自动落 PSRAM), 替代 LVGL 内置 64KB 池
+CONFIG_LV_USE_CLIB_MALLOC=y
+# LV_FONT_DEFAULT (theme 初始化需要)
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+# UI 各屏用到的内置 Montserrat 字号 (12/14/16/18/26/38)
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_26=y
+CONFIG_LV_FONT_MONTSERRAT_38=y
+# LVGL 日志 (调试, 稳定后可关)
+CONFIG_LV_USE_LOG=y

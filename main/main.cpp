@@ -14,6 +14,10 @@
 #include "drivers/rtasr.hpp"
 #include "drivers/llm.hpp"
 #include "drivers/app_fsm.hpp"
+#include "drivers/encoder.hpp"
+#include "display/lvgl_port.hpp"
+#include "display/lcd_display.hpp"
+#include "ui.h"
 
 static const char *TAG = "Main";
 
@@ -46,8 +50,20 @@ static void button_task(void *arg)
     ESP_ERROR_CHECK(btn_svc.init());
 
     while (1) {
+        /* ===== 诊断: 裸读 IO8 电平,监视变化(定位是硬件电平还是边沿逻辑问题) ===== */
+        {
+            static int s_last_svc_lvl = -1;
+            int svc_lvl = gpio_get_level(BTN_SVC_PIN);
+            if (svc_lvl != s_last_svc_lvl) {
+                ESP_LOGI(TAG, "[诊断] IO8 裸电平: %d -> %d (active_level=%d)",
+                         s_last_svc_lvl, svc_lvl, BTN_ACTIVE_LEVEL);
+                s_last_svc_lvl = svc_lvl;
+            }
+        }
+
         /* IO8 服务切换: 按下沿触发一次(长按不重复) */
         if (btn_svc.is_pressed_edge()) {
+            ESP_LOGI(TAG, "IO8 按下边沿触发 → 置切换挂起");
             s_fsm.set_svc_switch_pending();
         }
 
@@ -109,20 +125,39 @@ static void ws_task(void *arg)
     }
 }
 
+/* 编码器 → LVGL 键: 左转 LV_KEY_LEFT, 右转 LV_KEY_RIGHT (屏幕导航用)。
+ * 若实际旋转方向反了, 交换 encoder.hpp 里的 ENC_PIN_A/ENC_PIN_B。 */
+static void encoder_lvgl_cb(encoder_dir_t dir)
+{
+    lvgl_port_send_encoder_dir((int)dir);
+}
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=========Main=========");
     ESP_LOGI(TAG, "空闲堆: %u 字节", (unsigned)esp_get_free_heap_size());
+
+    /* 屏幕: LCD + LVGL 9.5 + SquareLine UI (默认加载 home 屏) */
+    ESP_ERROR_CHECK(lvgl_port_init());
+    lvgl_port_lock();
+    ui_init();
+    lvgl_port_unlock();
+    lcd_panel_backlight_on();   /* UI 就绪后再点亮背光 */
+
+    /* 旋转编码器 → LVGL 键 (方向变化在编码器任务里经回调发成 KEY_LEFT/RIGHT) */
+    ESP_ERROR_CHECK(encoder_init());
+    encoder_set_callback(encoder_lvgl_cb);
 
     /* 开机连接 WiFi(阻塞),之后断联重连由 wifi 驱动事件回调处理 */
     WiFi wifi;
     ESP_ERROR_CHECK(wifi.init());
     ESP_LOGI(TAG, "WiFi 连接成功");
 
-    /* 音频流缓冲(约 6 帧,1280 字节/帧),i2s_task 写入,ws_task 读出 */
+    /* 音频流缓冲(约 6 帧,1280 字节/帧),i2s_task 写入,ws_task 读出。
+     * A/B 测试: 从 PSRAM 改回内部 SRAM,验证语音错字是否与 PSRAM 相关。 */
     s_audio_buf = xStreamBufferCreate(8192, 1);
     if (s_audio_buf == NULL) {
-        ESP_LOGE(TAG, "Stream Buffer 创建失败");
+        ESP_LOGE(TAG, "音频 StreamBuffer 创建失败");
         return;
     }
 
