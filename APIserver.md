@@ -1,7 +1,7 @@
-# LanLink 统一服务网关 接口文档（V1.4）
+# LanLink 统一服务网关 接口文档（V1.5）
 
-> 服务器: 39.104.84.177 · 端口: 18888 · 2026-08-15 更新
-> 一条长连接 + 应用层切换: text(语音听写) / llm(大模型) / openclaw(明岚) / echo(调试)
+> 服务器: 39.104.84.177 · 端口: 18888 · 2026-08-22 更新
+> 一条长连接 + 应用层切换: text(语音听写) / llm(大模型) / openclaw(明岚) / usage(服务器监控) / weather(天气) / echo(调试)
 
 ---
 
@@ -16,11 +16,46 @@ ws://39.104.84.177:18888/?token=***
 {"type":"svc","service":"text"}       → {"type":"svc_ok","service":"text"}
 {"type":"svc","service":"llm"}        → {"type":"svc_ok","service":"llm"}
 {"type":"svc","service":"openclaw"}   → {"type":"svc_ok","service":"openclaw"}
+{"type":"svc","service":"usage"}      → {"type":"svc_ok","service":"usage"}
+{"type":"svc","service":"weather"}    → {"type":"svc_ok","service":"weather"}
 {"type":"svc","service":"echo"}       → {"type":"svc_ok","service":"echo"}
 ```
 
 - 切换自动清理上一服务状态；默认服务 text
 - 心跳: `{"type":"ping"}` → `{"type":"pong"}`（任何模式有效）
+
+---
+
+## 5. type=usage 服务器监控
+
+切换后服务器**每 2 秒自动推送**一条（无需请求）：
+```json
+{"type":"usage","usage":true,"t":1787411460,
+ "cpu":12,
+ "ram_used":"1.7G/2G","ram_pct":92,
+ "disk_used":"33.3G/39.0G","disk_pct":85,
+ "rx":4,"tx":2}
+```
+
+- cpu: 占用百分比(整数) · ram_pct/disk_pct: 百分比(整数)
+- ram_used/disk_used: 使用/总量 字符串（G 单位）
+- rx/tx: 网络速度，单位 KB/s（整数）
+- `usage` 字段为 true 即监控数据
+
+---
+
+## 6. type=weather 天气
+
+切换后自动推送一次，之后可随时 `{"type":"get"}` 主动刷新（网关 60s 缓存，省 QPS）：
+```json
+{"type":"weather","weather":true,"text":"多云","temp":"18",
+ "temp_max":"29","temp_min":"17","kind":3}
+```
+
+- text: 当前天气（中文，如 多云/晴/小雨）
+- temp: 当前温度(℃) · temp_max: 当日最高 · temp_min: 当日最低
+- kind: 天气类型 1~8（已按图标归类）:
+  1=白天晴 2=夜晚晴 3=多云 4=阴天 5=雨 6=雪 7=雷雨 8=风（999未知兜底为3多云）
 
 ---
 
@@ -62,7 +97,7 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
-## 5. 错误
+## 7. 错误
 
 ```json
 {"type":"error","code":1,"message":"讯飞错误"}
@@ -73,7 +108,7 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
-## 6. 连接保活
+## 8. 连接保活
 
 - 服务器 120s 协议层 ping 检测死连接（正常板子自动回 pong，不会误踢）
 - 板子建议 20~40s 发一次 `{"type":"ping"}` 应用层保活
@@ -81,7 +116,7 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
-## 7. 部署
+## 9. 部署
 
 | 项 | 值 |
 |---|---|
@@ -91,17 +126,20 @@ ws://39.104.84.177:18888/?token=***
 | 日志 | `gateway.log` |
 | 板端示例 | `board_example/`（gateway_client + handle_text） |
 
-## 8. 消息一览
+## 10. 消息一览
 
 | 方向 | type | 含义 | 处理 |
 |---|---|---|---|
 | 上行 | svc | 切换服务 | - |
 | 上行 | start/end | 语音轮次触发 | - |
 | 上行 | chat/clear | 对话/清空 | - |
+| 上行 | get | 主动刷新天气 | - |
 | 上行 | ping | 心跳 | - |
 | 下行 | svc_ok | 切换确认 | - |
 | 下行 | partial | 增量字(text)/流式字(对话) | 追加显示 |
 | 下行 | final | 语音最终文本 | 整体替换 = 完成 |
 | 下行 | reply | 对话完整回复 | 整体替换 = 完成 |
+| 下行 | usage | 服务器监控(2s一跳) | 定时更新 |
+| 下行 | weather | 天气数据 | 刷新显示 |
 | 下行 | pong | 心跳应答 | - |
 | 下行 | error | 错误 | 处理提示 |

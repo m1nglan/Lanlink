@@ -22,6 +22,7 @@ void lvgl_port_lock(void);
 void lvgl_port_unlock(void);
 
 /*! 把编码器旋转方向发成 LVGL 键 (左→LV_KEY_LEFT, 右→LV_KEY_RIGHT)。
- * 发送给默认 group 的聚焦对象; 无默认 group 时仅警告一次并忽略。
+ * 自动创建/复用默认 group, 并把当前激活屏幕设为聚焦对象,
+ * 使 SquareLine 挂在屏幕对象上的 LV_EVENT_KEY 切屏事件生效。
  * 内部自带 lvgl_port_lock, 任意任务上下文都可调用。 */
 void lvgl_port_send_encoder_dir(int dir);

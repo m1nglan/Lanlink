@@ -17,7 +17,7 @@ static const char *TAG = "lvgl";
 /* ------------------ 参数 ------------------ */
 #define LVGL_SPI_HOST       (SPI2_HOST)
 #define LVGL_TICK_PERIOD_MS (2)
-#define LVGL_DRAW_LINES     (20)        /*!< 每个绘图缓冲的行数 */
+#define LVGL_DRAW_LINES     (40)        /*!< 每个绘图缓冲的行数 (增大→每帧 flush 次数减半, 更顺; 内存 320*40*2*2=51KB) */
 #define LVGL_TASK_PRIO      (2)
 #define LVGL_TASK_STACK     (6 * 1024)
 #define LVGL_TASK_CORE      (1)         /*!< CPU1 (网络 ws_task 在 CPU0) */
@@ -159,17 +159,26 @@ void lvgl_port_unlock(void)
 
 void lvgl_port_send_encoder_dir(int dir)
 {
-    static bool s_warned = false;
     lvgl_port_lock();
+
+    /* 1. 无默认 group 就建一个 (SquareLine 导出不建组, 这里兜底) */
     lv_group_t *g = lv_group_get_default();
     if (g == NULL) {
-        if (!s_warned) {
-            s_warned = true;
-            ESP_LOGW(TAG, "无默认 lv_group, 编码器键未发送 (UI 导航需先建组并聚焦对象)");
-        }
-        lvgl_port_unlock();
-        return;
+        g = lv_group_create();
+        lv_group_set_default(g);
     }
-    lv_group_send_data(g, (dir < 0) ? LV_KEY_LEFT : LV_KEY_RIGHT);
+
+    /* 2. 让"当前激活屏幕"成为聚焦对象。
+     *    SquareLine 把切屏事件(lv_event_get_key == LV_KEY_LEFT/RIGHT)
+     *    挂在屏幕对象本身上, 只有被聚焦的屏幕才能收到 LV_EVENT_KEY。 */
+    lv_obj_t *scr = lv_screen_active();
+    if (scr != NULL) {
+        if (lv_obj_get_group(scr) != g) {
+            lv_group_add_obj(g, scr);
+        }
+        lv_group_focus_obj(scr);
+        lv_group_send_data(g, (dir < 0) ? LV_KEY_LEFT : LV_KEY_RIGHT);
+    }
+
     lvgl_port_unlock();
 }

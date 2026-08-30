@@ -43,3 +43,6 @@ CONFIG_LV_FONT_MONTSERRAT_26=y
 CONFIG_LV_FONT_MONTSERRAT_38=y
 # LVGL 日志 (调试, 稳定后可关)
 CONFIG_LV_USE_LOG=y
+# ★ 修复 I8 索引图(小图标/logo)不显示: SW 渲染器不能直接画索引图,
+#   开启后在打开时把 I8 整体解码成 ARGB8888 再画 (RGB565A8 不受影响, 仍零拷贝)
+CONFIG_LV_BIN_DECODER_RAM_LOAD=y
