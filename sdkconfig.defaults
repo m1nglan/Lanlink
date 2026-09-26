@@ -12,12 +12,13 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_custom.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions_custom.csv"
 
-# --- PSRAM: 8MB Octal @40MHz (n16r8) ---
-# 注: 80MHz 下实测 PSRAM 内存测试位翻转失败(20156 写失败),
-#     也是之前"音频放 PSRAM 错字"的根因 → 降频 40MHz 稳时序
+# --- PSRAM: 8MB Octal @80MHz (n16r8) ---
+# 注: 旧记录 80MHz 位翻转(音频错字根因), 但那时的屏幕老引脚 35/36/37
+#     正压着 PSRAM 的 D6/D7/DQS; 屏幕重接到 21/20/19/47/48/45 后雪花消失,
+#     判断 80MHz 不稳其实是接线冲突 → 改回 80MHz, 保留 memtest 开机自检兜底
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # --- 允许 .bss 段放到 PSRAM(EXT_RAM_BSS_ATTR), 省内部 SRAM ---

@@ -26,3 +26,10 @@ void lvgl_port_unlock(void);
  * 使 SquareLine 挂在屏幕对象上的 LV_EVENT_KEY 切屏事件生效。
  * 内部自带 lvgl_port_lock, 任意任务上下文都可调用。 */
 void lvgl_port_send_encoder_dir(int dir);
+
+/*! 注册编码器为 LVGL indev (LV_INDEV_TYPE_ENCODER)。
+ * 需读取 drivers/encoder 的原始跳变 (encoder_consume_raw)。
+ * ★ 必须在持有 lvgl_port_lock() 的情况下调用 (会创建 lv_indev + 默认 group)。
+ * 注册后: 旋转由 lv_timer_handler 内部自动读→驱动 group 导航/发键,
+ * 无需再调 lvgl_port_send_encoder_dir。 */
+esp_err_t lvgl_port_register_encoder_indev(void);

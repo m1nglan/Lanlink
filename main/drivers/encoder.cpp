@@ -2,17 +2,11 @@
 
 #include <stdint.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_attr.h"
+#include "freertos/FreeRTOS.h"
 
 static const char *TAG = "enc";
-
-/* 事件队列 + 用户回调 */
-static QueueHandle_t s_queue = NULL;
-static encoder_cb_t  s_cb   = NULL;
 
 /* A/B 相状态跳变方向表。
  * 状态编码: bit1=A, bit0=B; 索引 = (上一状态<<2)|当前状态。
@@ -25,9 +19,14 @@ static const int8_t s_dir_tbl[16] = {
         0,  1, -1,  0    /* 上一状态 11 */
 };
 
-static volatile uint8_t s_last = 0;   /* 最近一次两相电平 */
+static volatile uint8_t s_last = 0;       /* 最近一次两相电平 (仅 ISR 读写) */
+static int32_t          s_accum = 0;      /* 净跳变累加器 (临界区保护) */
 
-/* 双边沿中断: 任一编码器脚跳变都进来, 状态机解出旋转方向 */
+/* 临界区锁: ISR 用 _ISR 变体, 任务用普通变体, 保证跨核互斥 (ESP-IDF 标准做法) */
+static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* 双边沿中断: 任一编码器脚跳变都进来, 状态机解出方向并累加。
+ * 抖动引起的来回(+1/-1)会在累加器里自然抵消。 */
 static void IRAM_ATTR encoder_isr(void *arg)
 {
     (void)arg;
@@ -35,35 +34,10 @@ static void IRAM_ATTR encoder_isr(void *arg)
                             (uint32_t)gpio_get_level(ENC_PIN_B));
     int8_t d = s_dir_tbl[(uint8_t)((s_last << 2) | now)];
     s_last = now;
-    if (d == 0) {
-        return;
-    }
-    encoder_dir_t evt = (d > 0) ? ENC_DIR_RIGHT : ENC_DIR_LEFT;
-    BaseType_t hpw = pdFALSE;
-    xQueueSendFromISR(s_queue, &evt, &hpw);
-    if (hpw == pdTRUE) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-/* 驱动任务: 累计状态跳变, 每满 ENC_KEY_STEP(约一格 detent) 触发一次回调。
- * 抖动引起的来回(+1/-1)会相互抵消, 不会误触发。 */
-static void encoder_task(void *arg)
-{
-    (void)arg;
-    encoder_dir_t evt;
-    int32_t acc = 0;
-    while (1) {
-        if (xQueueReceive(s_queue, &evt, pdMS_TO_TICKS(50)) == pdTRUE) {
-            acc += (evt == ENC_DIR_RIGHT) ? 1 : -1;
-            if (acc >= ENC_KEY_STEP || acc <= -ENC_KEY_STEP) {
-                encoder_dir_t out = (acc > 0) ? ENC_DIR_RIGHT : ENC_DIR_LEFT;
-                if (s_cb != NULL) {
-                    s_cb(out);
-                }
-                acc = 0;
-            }
-        }
+    if (d != 0) {
+        portENTER_CRITICAL_ISR(&s_mux);
+        s_accum += d;
+        portEXIT_CRITICAL_ISR(&s_mux);
     }
 }
 
@@ -92,22 +66,25 @@ esp_err_t encoder_init(void)
     /* 3. 当前两相电平作为状态机初值 */
     s_last = (uint8_t)(((uint32_t)gpio_get_level(ENC_PIN_A) << 1) |
                        (uint32_t)gpio_get_level(ENC_PIN_B));
+    portENTER_CRITICAL(&s_mux);
+    s_accum = 0;
+    portEXIT_CRITICAL(&s_mux);
 
-    /* 4. 事件队列 + 中断回调 + 驱动任务 */
-    s_queue = xQueueCreate(ENC_QUEUE_LEN, sizeof(encoder_dir_t));
-    if (s_queue == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
+    /* 4. 挂中断 (无任务: 消费端在 LVGL 的 indev read_cb 里, 见 lvgl_port) */
     gpio_isr_handler_add(ENC_PIN_A, encoder_isr, NULL);
     gpio_isr_handler_add(ENC_PIN_B, encoder_isr, NULL);
-    xTaskCreatePinnedToCore(encoder_task, "encoder", ENC_TASK_STACK, NULL,
-                            ENC_TASK_PRIO, NULL, ENC_TASK_CORE);
 
-    ESP_LOGI(TAG, "encoder init: A=%d B=%d key_step=%d", ENC_PIN_A, ENC_PIN_B, ENC_KEY_STEP);
+    ESP_LOGI(TAG, "encoder init: A=%d B=%d key_step=%d (无任务, ISR+累加器)",
+             ENC_PIN_A, ENC_PIN_B, ENC_KEY_STEP);
     return ESP_OK;
 }
 
-void encoder_set_callback(encoder_cb_t cb)
+int encoder_consume_raw(void)
 {
-    s_cb = cb;
+    /* 临界区取走全部净跳变并清零: 保证不丢 ISR 期间的累加, 且跨核安全 */
+    portENTER_CRITICAL(&s_mux);
+    int32_t v = s_accum;
+    s_accum = 0;
+    portEXIT_CRITICAL(&s_mux);
+    return (int)v;
 }
