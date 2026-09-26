@@ -1,4 +1,5 @@
 #include "drivers/button_edge.hpp"
+#include "drivers/gpio_isr_once.hpp"
 
 #include <string.h>
 
@@ -22,10 +23,6 @@ typedef struct {
 static btn_edge_t s_btns[BTN_EDGE_MAX_BUTTONS];
 static int        s_btn_count = 0;
 
-/* 诊断计数 (稳定后可删) */
-static volatile uint32_t s_isr_hits   = 0;   /* ISR 被触发次数 */
-static volatile uint32_t s_timer_hits = 0;   /* 消抖 timer 到期次数 */
-
 /* 中断: 任意边沿都进来, 只重启消抖 timer (推迟上报, 直到电平稳定)。
  * 注意: esp_timer_restart 对"未启动"的 timer 会返回 INVALID_STATE 且不启动它,
  * 故首次边沿必须用 start_once 启动; 之后 restart 推迟。
@@ -33,7 +30,6 @@ static volatile uint32_t s_timer_hits = 0;   /* 消抖 timer 到期次数 */
 static void IRAM_ATTR button_edge_isr(void *arg)
 {
     btn_edge_t *b = (btn_edge_t *)arg;
-    s_isr_hits++;
     const uint64_t debounce_us = (uint64_t)BTN_EDGE_DEBOUNCE_MS * 1000;
     if (esp_timer_restart(b->timer, debounce_us) != ESP_OK) {
         esp_timer_start_once(b->timer, debounce_us);   /* 尚未启动 → 启动它 */
@@ -44,7 +40,6 @@ static void IRAM_ATTR button_edge_isr(void *arg)
 static void button_edge_timer_cb(void *arg)
 {
     btn_edge_t *b = (btn_edge_t *)arg;
-    s_timer_hits++;
     bool pressed = (gpio_get_level(b->pin) == b->active_level);
 
     if (pressed != b->last_settled) {
@@ -66,10 +61,10 @@ esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, v
         return ESP_ERR_NO_MEM;
     }
 
-    /* 1. GPIO 中断服务 (encoder 可能已装, 容忍 INVALID_STATE) */
-    esp_err_t ret = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service: %s", esp_err_to_name(ret));
+    /* 1. GPIO 中断服务: 与 encoder 共用, 幂等(见 gpio_isr_once.hpp) */
+    esp_err_t ret = gpio_isr_service_ensure();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_isr_service_ensure: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -119,16 +114,4 @@ esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, v
     ESP_LOGI(TAG, "GPIO%d init OK (active=%d, 消抖=%dms)",
              pin, active_level, BTN_EDGE_DEBOUNCE_MS);
     return ESP_OK;
-}
-
-/* ---- 诊断接口 (排查用, 稳定后可删) ---- */
-
-uint32_t button_edge_isr_hits(void)
-{
-    return s_isr_hits;
-}
-
-uint32_t button_edge_timer_hits(void)
-{
-    return s_timer_hits;
 }

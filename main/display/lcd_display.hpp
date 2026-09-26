@@ -8,8 +8,10 @@
 /* ================================================================
  * LCD 驱动: ST7789 320x170 1.9寸条屏 (SPI2_HOST, 纯 IDF esp_lcd)
  *
- * 接线:
- *   SCLK=40  MOSI=39  RST=38  DC=37  CS=36  BL(背光)=35
+ * 接线(以本文件下方 LCD_PIN_* 宏为准):
+ *   SCLK=21  MOSI=20  RST=19  DC=47  CS=48  BL(背光)=45
+ *   ⚠️ 旧版本曾用 35/36/37, 与 n16r8 的 Octal PSRAM(GPIO33-37)冲突,
+ *      会导致雪花 + PSRAM 位翻转 —— 已改到上面这组, 不要再改回去。
  *
  * 使用: lcd_panel_init() 只负责硬件初始化 + 点亮背光;
  *       LVGL 移植层(lvgl_port)拿到 panel/io 句柄做刷屏。
@@ -49,13 +51,6 @@
 #define LCD_RGB_ORDER_RGB   1
 #define LCD_SWAP_BYTES      1
 #define LCD_INVERT_COLOR    1
-
-/* ------------------ 旋转编码器预留引脚 ------------------
- * 后续接屏幕切换导航用 (本阶段只预留, 不初始化)。
- * 避开已占用: IO8/10/11/12/13 (按键+I2S) 和屏的 35~40 */
-#define ENC_A_PIN       (GPIO_NUM_4)
-#define ENC_B_PIN       (GPIO_NUM_5)
-#define ENC_BTN_PIN     (GPIO_NUM_6)
 
 /*!
  * 初始化 SPI 总线 + ST7789 面板, 点亮背光。

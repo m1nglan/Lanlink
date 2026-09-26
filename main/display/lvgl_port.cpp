@@ -231,38 +231,15 @@ static void lvgl_focus_active_screen_locked(lv_group_t *g)
     }
 }
 
-void lvgl_port_send_encoder_dir(int dir)
-{
-    lvgl_port_lock();
-
-    lv_group_t *g = lv_group_get_default();
-    if (g == NULL) {
-        g = lv_group_create();
-        lv_group_set_default(g);
-    }
-    lvgl_focus_active_screen_locked(g);
-    lv_group_send_data(g, (dir < 0) ? LV_KEY_LEFT : LV_KEY_RIGHT);
-
-    lvgl_port_unlock();
-}
-
 /* ============ 编码器 indev (无任务, 由 lv_timer_handler 周期驱动) ============
  * LVGL 内部每轮 lv_timer_handler 会调用本 read_cb (已在持锁上下文, 禁止再加锁)。
  * 我们从 encoder 驱动取原始跳变, 按 ENC_KEY_STEP 换算成"格"填入 data->enc_diff。 */
 
-static int      s_enc_carry = 0;    /*!< 不足一格的跳变余数 (跨帧累积) */
-static volatile uint32_t s_read_calls = 0;   /* 诊断: read_cb 被调用次数 (稳定后可删) */
-
-/* 诊断快照: 只在 read_cb 内(持 LVGL 锁)更新, diag 任务无锁直接读
- * (32bit 对齐读, 诊断用途足够)。稳定后连同上面一起删。 */
-static volatile uint32_t s_steps_total = 0;  /*!< 累计交付给 group 的 |格数| */
-static volatile uint32_t s_editing     = 0;  /*!< 组是否编辑模式 (1=会发 LV_KEY_LEFT/RIGHT) */
-static volatile uint32_t s_focus_ok    = 0;  /*!< 聚焦对象 == 当前激活屏 */
+static int s_enc_carry = 0;    /*!< 不足一格的跳变余数 (跨帧累积) */
 
 static void lvgl_encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-    s_read_calls++;
 
     int32_t raw = encoder_consume_raw();      /* 取走全部净跳变(含正负) */
     s_enc_carry += raw;
@@ -274,14 +251,10 @@ static void lvgl_encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->key      = LV_KEY_ENTER;                /* 编码器无按键, 占位 */
     data->state    = LV_INDEV_STATE_RELEASED;     /* 永远松开 (无按下源) */
 
-    s_steps_total += (uint32_t)((steps < 0) ? -steps : steps);
-
     /* 每轮确保聚焦当前屏: 切屏后新屏才能收到后续旋转键 */
     lv_group_t *g = lv_group_get_default();
     if (g != NULL) {
         lvgl_focus_active_screen_locked(g);
-        s_editing  = lv_group_get_editing(g) ? 1u : 0u;
-        s_focus_ok = (lv_group_get_focused(g) == lv_screen_active()) ? 1u : 0u;
     }
 }
 
@@ -311,30 +284,4 @@ esp_err_t lvgl_port_register_encoder_indev(void)
 
     ESP_LOGI(TAG, "encoder indev 注册完成 (编辑模式, 发 LV_KEY_LEFT/RIGHT)");
     return ESP_OK;
-}
-
-/* 诊断: read_cb 被调用的累计次数 (稳定后可删) */
-uint32_t lvgl_encoder_read_calls(void)
-{
-    return s_read_calls;
-}
-
-/* 诊断: 累计交付给 group 的 |格数| (稳定后可删)。
- *  不涨 → 旋转没被消费成"格"; 涨了但屏幕不动 → 看下面 editing/focus_ok。 */
-uint32_t lvgl_encoder_steps_total(void)
-{
-    return s_steps_total;
-}
-
-/* 诊断: group 是否处于编辑模式 (1=旋转会发 LV_KEY_LEFT/RIGHT)。
- *  ★ 若为 0, 旋转只会移动焦点, SquareLine 的切屏事件永远收不到, 表现=编码器完全无反应。 */
-uint32_t lvgl_encoder_editing(void)
-{
-    return s_editing;
-}
-
-/* 诊断: 聚焦对象是否就是当前激活屏 (1=是, 收得到 LV_EVENT_KEY)。 */
-uint32_t lvgl_encoder_focus_ok(void)
-{
-    return s_focus_ok;
 }

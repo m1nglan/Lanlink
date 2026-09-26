@@ -1,7 +1,7 @@
 # Lanlink 交接文档（Handoff）
 
 > 本文件是**接手本项目的入口**。先读这里，再按需读文末「文档索引」。
-> 最后更新：阶段 1 实施中途（正在排查输入链路）。
+> 最后更新：**阶段 1 完成**（输入事件化已在硬件验证；待 commit）。下一步补阶段 0，然后进阶段 2。
 
 ---
 
@@ -60,20 +60,33 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 |---|---|
 | 分支 | `CH_rebuild_logic` |
 | 最新提交 | `080b442 GPIO改esp中断` |
-| 工作区 | 干净（**但已加了未提交的诊断代码，见 §5**） |
-| 阶段 | **重构阶段 1 实施中**（输入事件化），卡在"输入无反应" |
+| 工作区 | 有未提交改动（阶段 1 全部成果 + 清理，待 commit） |
+| 阶段 | **重构阶段 1 完成**（输入事件化：编码器 + 按键均已在硬件上验证通过） |
 
-### 🚨 立即可见的问题（接手第一件事）
+### 阶段 1 成果一句话
 
-`main/main.cpp` 现在是**阶段 1 最小验证版**：只初始化 LVGL + 编码器 + 按键 + 诊断任务，
-**没有 WiFi / WS / 语音 / LLM**（这些是阶段 2+ 的事）。
+`main/main.cpp` 是**阶段 1 最小验证版**：只初始化 LVGL + 编码器 + 按键，
+**没有 WiFi / WS / 语音 / LLM**（阶段 2+ 的事）。已实测：
 
-用户实测反馈：**按物理键、转编码器，屏幕和串口均无反应。**
+- ✅ 转编码器 → LVGL indev → 切屏正常（**无独立任务、无跨任务锁**）
+- ✅ 按 IO10 / IO8 → GPIO 中断 + esp_timer 消抖 → 边沿回调正常（**无轮询**）
+- ✅ 全工程只有 `lvgl` 一个自建任务（"无 encoder 任务"这条达标）
+- ✅ 无 Guru Meditation / 死锁 / Task WDT
 
-**进展**：
-- 编码器那条链的根因**已在源码级定位并修复**（编辑模式被 `lv_group_focus_obj` 清掉，见 §5）。
-- 按键那条链的驱动逻辑已逐行核对无误，怀疑接线/电平，等诊断日志。
-- **当前待办：烧录一次，按 §5 的判读表读日志。**（诊断代码 + 修复都在工作区，未提交、未烧录）
+期间修掉的 3 个坑（都已记入 §5 / §6，务必读）：
+1. **编码器全无反应** —— `lv_group_focus_obj()` 会清掉编辑模式（§5.1）
+2. **Task WDT 饿死 IDLE1** —— `pdMS_TO_TICKS(5)` 在 `HZ=100` 下 == 0，`vTaskDelay(0)` 不让出（§6）
+3. **按键大抖动** —— 消抖 15ms 不够，本硬件验证值是 50ms（§5.3）
+
+### ⚠️ 进度和 REBUILD.md 的阶段划分对不上
+
+**阶段 0 基本没做**：`main/business/` 不存在、`CMakeLists.txt` 没有 `"business"`、
+`ws.cpp::init()` 没补 `.task_core_id/.task_prio`、`app_fsm.{hpp,cpp}` 与
+`button.{hpp,cpp}` 仍在 `drivers/` 里被 glob 照常编译。
+
+### 👉 下一步
+
+先补阶段 0，再做**阶段 2**（ws_keeper + UiBridge + voice 骨干）。
 
 ---
 
@@ -84,13 +97,17 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 核心思路（一句话）：**业务从"状态机轮询"改为"事件/命令驱动"**，
 `RtAsr`/`Llm`/`WS` 协议层几乎不动（干净无状态），重写的是调度层（`AppFsm` 退役）。
 
-阶段划分：0 基础设施 → **1 输入事件化(进行中)** → 2 ws_keeper+UiBridge → 3 语音采音闭环 → 4 清理。
+阶段划分：~~0 基础设施~~（**未做，需补**）→ ~~1 输入事件化~~（**已完成**）→ **2 ws_keeper+UiBridge（下一个）** → 3 语音采音闭环 → 4 清理。
+
+> ⚠️ 阶段 2 会往 **CPU0** 一次性加 3 个东西（`ws_keeper` prio5、`voice` prio6、
+> 组件自带 `websocket_task` prio5）。§6 那个 `pdMS_TO_TICKS` 陷阱会**从 CPU1 搬到 CPU0**，
+> 新任务一律用"夹紧 tick 值"的写法，否则 IDLE0 会被饿死、Task WDT 照炸。
 
 ---
 
-## 5. 输入链路无反应
+## 5. 输入链路（阶段 1，**已全部解决**）
 
-### ✅ 编码器无反应 —— **已定位（源码级），已修复**
+### ✅ 5.1 编码器无反应 —— 已修复（源码级定位）
 
 **根因：编辑模式被 `lv_group_focus_obj()` 清掉，旋转退化成 navigate 模式。**
 
@@ -113,8 +130,9 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
    - 之后每轮 read_cb 焦点都已是 `ui_home`，条件不再成立，**`editing` 永久停在 0**。
    → **开机 7.5 秒后转编码器：ISR 正常、indev 正常、格数正常，但屏幕永远不动。**
 
-**为什么旧方案没这问题**：退役的 `lvgl_port_send_encoder_dir()` 直接调 `lv_group_send_data()`，
-绕开了编辑模式判断。改成 indev 后依赖编辑模式，就踩上了。
+**为什么旧方案没这问题**：重构前那个 `lvgl_port_send_encoder_dir()`（**已删除**）直接调
+`lv_group_send_data()`，**绕过了编辑模式判断**，所以同一套 group 设置它能用；
+改成 indev 后依赖编辑模式，就踩上了 —— 这也是当初最难看出根因的原因。
 
 **修复**（`main/display/lvgl_port.cpp::lvgl_focus_active_screen_locked`）：
 - 屏幕一变就 `lv_group_remove_all_objs()` 再 `add_obj(当前屏)` → 组里**只留当前屏**，
@@ -122,76 +140,60 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 - 最后**无条件重申** `lv_group_set_editing(g, true)`（函数内部幂等，`editing` 相同直接 return）→ 自愈。
 - 稳定态下两个条件都成立 → 整块跳过，**零额外开销、无额外重绘**。
 
-### 物理按键无反应 —— **尚未定位，等烧录诊断**
+### ✅ 5.2 物理按键无反应 —— 已解决（根因是引脚认错，不是软件）
 
-`button_edge` 的 ISR/消抖逻辑已逐行核对，**是对的**：
-- `esp_timer_restart()` 未 arm 时返回 `ESP_ERR_INVALID_STATE` 且不动它
-  （`esp_timer.c:143-145`，`timer_armed()` = `alarm > 0`，`esp_timer.c:373`）→ ISR 里回退
-  `esp_timer_start_once()` 覆盖首次边沿；一次性 timer 到期后 `alarm` 归零（`esp_timer.c:426`），
-  下次边沿同样走回退分支。✓
-- GPIO 中断只装在一个核上（`gpio_intr_enable_on_core(..., esp_intr_get_cpu(handle))`，
-  `esp_driver_gpio/src/gpio.c:572`），app_main 在 CPU0，无亲和性坑。✓
+现象：按 IO10/IO8 无任何反应，串口连"裸电平 1→0"都没有；用户手动拉低也没反应。
 
-→ 所以按键更像是**接线/电平**问题，诊断行会给答案。
+排查结论（**软件侧全部排除**）：
+- 编码器与按键用的是**同一条 GPIO ISR 服务**（`gpio_install_isr_service` +
+  `gpio_isr_handler_add`）。编码器 ISR 确认工作（`enc_raw` 只由 ISR 累加，ISR 不跑屏幕根本不会转）
+  → **中断分发层是好的**。
+- 我一度怀疑 IDF 的核错配：`gpio_intr_service` 按 `isr_core_id` 读中断状态寄存器
+  （`gpio.c:520`），而 `gpio_install_isr_service()` **本身不设置** `isr_core_id`
+  （初值 `GPIO_ISR_CORE_ID_UNINIT=3`）。若它一直是 3，ISR 会去读 CPU1 的状态位而中断却在
+  CPU0 使能 → 一个都不会触发。**但** `gpio_install_isr_service()` 内部会调
+  `gpio_isr_register()`，后者在 `gpio.c:631-632` 把 `isr_core_id = xPortGetCoreID()`
+  并在**同一个核**上注册 → **一致，无错配**。
+- 旧轮询驱动 `button.cpp` 与 `button_edge_init` 的 `gpio_config` 参数**完全一样**
+  （只差 `intr_type`：`DISABLE` vs `ANYEDGE`），上拉都是开的。同一焊盘以前读得到，
+  没有理由现在读不到。
 
-### 诊断（已加，**未烧录验证**）
+⇒ 结论：**"拉低没反应"只可能是拉的那个脚不是 GPIO10/GPIO8**（排针丝印/序号认错、焊错点、焊盘坏）。
+用户修正后按键即正常工作。
 
-| 文件 | 新增接口 |
-|---|---|
-| `main/drivers/encoder.{hpp,cpp}` | `encoder_isr_hits()`、`encoder_peek_raw()` |
-| `main/drivers/button_edge.{hpp,cpp}` | `button_edge_isr_hits()`、`button_edge_timer_hits()` |
-| `main/display/lvgl_port.{hpp,cpp}` | `lvgl_encoder_read_calls()`、`lvgl_encoder_steps_total()`、`lvgl_encoder_editing()`、`lvgl_encoder_focus_ok()` |
-| `main/main.cpp` | `diag_task`：每 500ms 打印全部计数 + 引脚裸电平 + 组状态 |
+**教训（下次直接照做）**：诊断必须能区分"**电平没进芯片**"和"**电平进了但中断没触发**"。
+做法是同时给出 ① 裸电平**变化事件**日志（高频采样，一变就打印，别只在汇总里印当前值）
++ ② "曾经读到过低电平"的**锁存位**（不受采样时机影响）。
+只有"每 500ms 打一次当前电平"会把这两种完全不同的故障混为一谈。
 
-串口每 500ms 输出：
-```
-[诊断] IO7=1 IO15=1 | IO10=1 IO8=1 | enc_isr=0 enc_raw=0 | btn_isr=0 btn_tmr=0 | indev_read=1234 enc_steps=0 edit=1 focus=1
-```
-
-**按键（按住 IO10 时）：**
-| 现象 | 结论 |
-|---|---|
-| 完全没有 `[裸电平]`，且 `曾低过=0/0` | **你拉的那个脚不是 GPIO10/GPIO8**（排针丝印认错/焊错点/焊盘坏），软件无辜 |
-| 有 `[裸电平]` 或 `曾低过=1`，但 `btn_isr` 不涨 | GPIO 中断没触发 |
-| `btn_isr` 涨但 `btn_tmr` 不涨 | esp_timer 没跑 |
-| 都涨但无 `[btn_edge]`/`[按键]` 日志 | 消抖后电平判断反了（如上电瞬间脚就是低的） |
-| 一次按下打出多条 按下/释放 | **消抖时长不够** → 见下方 §5.3 |
-
-#### 5.3 按键抖动（2026-xx 已处理）
+### ✅ 5.3 按键抖动 —— 已解决（消抖时长回归）
 
 阶段 1 初版 `BTN_EDGE_DEBOUNCE_MS = 15`，实测一次按下会打出多条 `按下/释放`。
+
 **回归原因**：旧轮询驱动 `button.hpp` 用的是 `BTN_DEBOUNCE_MS(10) x BTN_DEBOUNCE_N(5)`
 = **50ms 连续稳定**，那才是本硬件上验证过（含提交 `6fa1fc5「修复io8抖动」`）的值。
+重启式消抖的固有弱点：机械抖动的**安静期只要 > 消抖时长**，就会误报一次。
+
 → 已把 `BTN_EDGE_DEBOUNCE_MS` 改回 **50**（重启式消抖，等价于旧版"连续稳定 50ms"）。
 
 权衡：按下延迟 ≈ 本值；松开→voice_stop 最坏 ≈ 本值 + 帧边界 40ms（阶段 3）。
 若 50ms 仍抖，先怀疑**电气**（内部上拉只有 ~45kΩ，长线 + 40MHz SPI 串扰）：
 外挂 10k 上拉 + 100nF 到 GND，而不是继续加大消抖。
 
-**编码器：**
-| 现象 | 结论 |
-|---|---|
-| `indev_read` 不动 | LVGL 没轮询该 indev（或屏幕动画一直没结束，`prev_scr` 卡住） |
-| `enc_isr` 不涨 | GPIO 中断没触发 → 接线/编码器公共端 |
-| `enc_isr` 涨但 `enc_steps` 不涨 | 跳变没凑够一格 → `ENC_KEY_STEP` 偏大（或编码器是无 detent 型） |
-| `enc_steps` 涨但 `edit=0` | **就是上面那个 bug**（本版本已修） |
-| `edit=1` 但 `focus=0` | 聚焦对象不是当前屏 |
-| 四项都好但屏幕不动 | 才轮到怀疑 SquareLine 事件/屏幕本身 |
-
 ### 已排除的假设（省得重查）
 
 - ❌ "indev 没绑 display" —— **错**。`lv_indev_create()` 内部已 `indev->disp = lv_display_get_default()`（`lv_indev.c:134`）。
-- ❌ "`button_edge.cpp` 没被编译" —— 那是**上一轮**的 CMake glob 问题，已 touch CMakeLists 解决，`.obj` 已生成。
+- ❌ "`button_edge.cpp` 没被编译" —— 那是更早一轮的 CMake glob 问题，已 touch CMakeLists 解决。
 - ❌ "`lv_group_focus_obj` 清编辑模式的路径不成立" —— 注册那一刻确实逃过去了（`lv_group_add_obj` 内部
   refocus 走 `focus_next_core` 直接改 `obj_focus`），**是切屏之后才踩上的**。别只查注册路径。
 
-### 两个"设计上本就无反应"的点
+### 两个"设计上本就无反应"的点（**别当成 bug**）
 
 1. **启动屏 `ui_main` 不处理按键**：只处理 `SCREEN_LOADED`，然后**延迟 7000ms** 才切到 `ui_home`
    （`ui_home` 才处理 `LV_KEY_LEFT/RIGHT`）。→ **开机前 ~7.5 秒转编码器本就不该有反应。**
 2. **屏幕动画期间输入被屏蔽**：`lv_indev_read()` 开头 `if(indev->disp->prev_scr != NULL) return;`
-   （`lv_indev.c:244`）—— 注意这一句在 `read_cb` **之前**，所以动画期间 `indev_read`/`enc_steps`
-   计数也会一起冻住，别误判成"indev 没被轮询"。
+   （`lv_indev.c:244`）—— 注意这一句在 `read_cb` **之前**，所以动画期间任何 read_cb 侧计数
+   也会一起冻住，别误判成"indev 没被轮询"。
 
 ---
 
@@ -217,6 +219,7 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | `lv_label_set_text` **内部会复制**文本到 label | → **不需要自己另开 char 数组存文字**；删 label 时 `lv_free` 自动回收 |
 | 编码器 indev 需 `lv_indev_set_group()` 绑组 | 否则 `indev_encoder_proc` 拿不到焦点对象 |
 | **编辑模式 vs 导航模式**：`lv_group_set_editing(g,true)` 才发 `LV_KEY_LEFT/RIGHT` 给聚焦对象；否则转动只移动焦点 | SquareLine 的切屏事件监听的是 `LV_EVENT_KEY`，故必须编辑模式 |
+| ★ **`lv_group_focus_obj()` 内部会 `lv_group_set_editing(g,false)`**（`lv_group.c:242`，函数第一件事）—— **只要它真被调用，编辑模式就被清掉** | 用编码器 indev 时千万别随便调 `focus_obj`；`lv_group_add_obj()` 走的是 refocus→`focus_next_core`（直接改 `obj_focus`，**不清**编辑模式），两者行为不同，别以为等价 |
 | 转动 → 焦点对象收到 `LV_EVENT_KEY`；按 ENTER 松开 → `LV_EVENT_CLICKED` | 做"按钮触发"就挂 `LV_EVENT_CLICKED` |
 | **`lv_screen_active()` 是聚焦对象**才能收到键 | SquareLine 把切屏事件挂在**屏幕对象**上 |
 
@@ -226,6 +229,8 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 |---|---|
 | `esp_timer_restart()` 对**未启动**的 timer 返回 `INVALID_STATE` 且**不启动它** | → ISR 里首次边沿须用 `start_once`，之后才 `restart` |
 | `esp_timer_restart/start_once` 是 `ESP_TIMER_IRAM_ATTR` | ISR 内可安全调用 |
+| **`gpio_install_isr_service()` 全芯片只能成功装一次**，第二次返回 `ESP_ERR_INVALID_STATE` 并**打一条 `E` 级日志**（`gpio.c:537`） | 多个驱动都要 GPIO 中断时，统一走 `drivers/gpio_isr_once.hpp` 的 `gpio_isr_service_ensure()`（幂等，函数内 static 保证全程序单实例）→ 启动日志不再出现误导性的 `E gpio: GPIO isr service already installed` |
+| **`gpio_intr_service` 按 `isr_core_id` 读中断状态寄存器**（`gpio.c:520`），而该值由 `gpio_isr_register()` 设为调用者所在核（`gpio.c:631-632`） | 若哪天出现"中断使能在 A 核、状态却在 B 核读"的错配，GPIO 中断会**全部静默失效**。排查时记住 `gpio_install_isr_service()` **自身不设置** `isr_core_id`（初值 `GPIO_ISR_CORE_ID_UNINIT=3`） |
 | `_Atomic` 是 C11，**C++ 不认**（IDF 用 `gnu++26`） | 用 `std::atomic` 或 `portMUX_TYPE` 临界区 |
 | **C++20 起 `volatile` 的 `++` / `--` / 复合赋值（`+=` 等）被弃用**，IDF 用 `gnu++26`，默认 `-Werror=volatile` 会**直接编译失败** | 已在 `main/CMakeLists.txt` 加 `-Wno-error=volatile` **降级为警告**（与已有三条同一个 `target_compile_options` 块）→ 代码可继续写 `s_x++`。若哪天真要清零警告，改成 `x = x + 1;` 即可（`x += 1` 同样被弃用） |
 | `std::atomic` 的 `fetch_add` 在 Xtensa 不保证无锁 | **ISR 内用 `portENTER_CRITICAL_ISR` 更稳** |
@@ -259,6 +264,7 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 |---|---|---|
 | **`HANDOFF.md`** | ← 本文件，接手入口 | 最新 |
 | [`REBUILD.md`](REBUILD.md) | **重构完整方案**（双通道队列/任务布局/阶段/消息结构/4 大坑/分工） | 最新，当前计划 |
+| `drivers/gpio_isr_once.hpp` | GPIO ISR 服务"只装一次"helper（消除启动日志里的误导性 `E`） | 新增 |
 | [`APP_FSM.md`](APP_FSM.md) | **旧**状态机工作逻辑详解（`AppFsm` 的 tick 七步、WS 回调分发表） | 描述**重构前**的架构，供理解历史 |
 | [`APIserver.md`](APIserver.md) | 服务器端 WS 协议说明 | 参考 |
 | `problem.md` / `STACK_OVERFLOW.md` | 历史问题记录（栈溢出等） | 历史 |
@@ -278,5 +284,16 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
   重接线后雪花消失，故判断是**接线冲突**，当前已改回 80MHz。
   `CONFIG_SPIRAM_MEMTEST=y` 保留作开机自检兜底 —— **若启动 abort，说明该判断有误，需回退 40MHz**。
 - ⚠️ `main/CMakeLists.txt` 用 `SRC_DIRS` + glob：**每次新增源文件都要 touch 它**（见 §6）。
-- 📌 阶段 1 的诊断代码是**临时的**，输入链路修好后应连同诊断接口一并删除。
-- 📌 重构未完成：`main/business/` 目录（ui_bridge / voice / ws_keeper / bus_msg.hpp）**尚未创建**。
+- 📌 **阶段 1 收尾已完成**：`diag_task` 与全部临时诊断接口（`encoder_isr_hits` / `encoder_peek_raw` /
+  `button_edge_isr_hits` / `button_edge_timer_hits` / `lvgl_encoder_*`）已删除；
+  `E gpio: GPIO isr service already installed` 噪音已消除（新增 `drivers/gpio_isr_once.hpp`）；
+  `lcd_display.hpp` 过时引脚注释与无用的 `ENC_A_PIN` 宏已清理；
+  `lvgl_port_send_encoder_dir()` 与 `encoder_dir_t` 死代码已删除。
+  **输入链路若再出问题，诊断需重新添加**（照 §5.2 末尾的"教训"写）。
+- 📌 **未做**：阶段 0 的基础设施（`main/business/`、`CMakeLists.txt` 加 `"business"`、
+  `ws.cpp` 补 `.task_core_id/.task_prio`、`app_fsm`/`button` 留档改名）。
+- 📌 **已知行为（未改，用户明确要求先不动）**：`lv_indev_read()` 在屏幕动画期间
+  （`prev_scr != NULL`，约 500ms）会在调 `read_cb` **之前** return，所以动画期间转的跳变会
+  **攒在 `s_accum` 里**，动画结束后一次结算 → `enc_diff` 可能是十几格 → `indev_encoder_proc`
+  的 `for` 循环连发多次键 → **可能连跳好几屏**。
+  若要治：在 `lvgl_encoder_read_cb` 里把每轮 `steps` 夹到 ±1（会牺牲"快转=快切"的手感）。

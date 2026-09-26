@@ -24,21 +24,9 @@
 #define ENC_KEY_STEP    (4)               /*!< 一格 detent 的状态跳变数 (EC11 一格≈4)。
                                               转一格出多个键 → 调大; 转几格才出一个键 → 调小 */
 
-/*! 旋转方向 */
-typedef enum {
-    ENC_DIR_LEFT  = -1,   /*!< 左转(逆时针) */
-    ENC_DIR_RIGHT =  1,   /*!< 右转(顺时针) */
-} encoder_dir_t;
-
 /*! 初始化编码器: GPIO 输入+上拉+双边沿中断 + 挂 ISR (不创建任务) */
 esp_err_t encoder_init(void);
 
 /*! 取走自上次调用以来的净跳变数并清零 (原子, 可跨任务/ISR 安全调用)。
  *  正=顺时针(右), 负=逆时针(左)。消费方通常除以 ENC_KEY_STEP 得格数。 */
 int encoder_consume_raw(void);
-
-/*! 诊断: 查看当前累加值但不清零 (稳定后可删) */
-int encoder_peek_raw(void);
-
-/*! 诊断: ISR 累计触发次数 (稳定后可删) */
-uint32_t encoder_isr_hits(void);

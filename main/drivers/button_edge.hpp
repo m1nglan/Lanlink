@@ -47,7 +47,3 @@ typedef void (*btn_edge_cb_t)(void *ctx, gpio_num_t pin, bool pressed);
  * @return ESP_OK 成功
  */
 esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, void *ctx);
-
-/* ---- 诊断接口 (稳定后可删) ---- */
-uint32_t button_edge_isr_hits(void);    /*!< ISR 累计触发次数 */
-uint32_t button_edge_timer_hits(void);  /*!< 消抖 timer 累计到期次数 */

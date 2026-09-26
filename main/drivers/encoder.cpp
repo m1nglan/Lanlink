@@ -1,4 +1,5 @@
 #include "drivers/encoder.hpp"
+#include "drivers/gpio_isr_once.hpp"
 
 #include <stdint.h>
 
@@ -21,7 +22,6 @@ static const int8_t s_dir_tbl[16] = {
 
 static volatile uint8_t s_last = 0;       /* 最近一次两相电平 (仅 ISR 读写) */
 static int32_t          s_accum = 0;      /* 净跳变累加器 (临界区保护) */
-static volatile uint32_t s_isr_hits = 0;  /* 诊断: ISR 被触发次数 (含判不出方向的跳变) */
 
 /* 临界区锁: ISR 用 _ISR 变体, 任务用普通变体, 保证跨核互斥 (ESP-IDF 标准做法) */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -31,7 +31,6 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static void IRAM_ATTR encoder_isr(void *arg)
 {
     (void)arg;
-    s_isr_hits++;
     uint8_t now = (uint8_t)(((uint32_t)gpio_get_level(ENC_PIN_A) << 1) |
                             (uint32_t)gpio_get_level(ENC_PIN_B));
     int8_t d = s_dir_tbl[(uint8_t)((s_last << 2) | now)];
@@ -45,10 +44,10 @@ static void IRAM_ATTR encoder_isr(void *arg)
 
 esp_err_t encoder_init(void)
 {
-    /* 1. GPIO 中断服务 (项目其他驱动未装过; 已装则返回 INVALID_STATE, 忽略) */
-    esp_err_t ret = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service: %s", esp_err_to_name(ret));
+    /* 1. GPIO 中断服务: 与 button_edge 共用, 幂等(见 gpio_isr_once.hpp) */
+    esp_err_t ret = gpio_isr_service_ensure();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_isr_service_ensure: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -89,20 +88,4 @@ int encoder_consume_raw(void)
     s_accum = 0;
     portEXIT_CRITICAL(&s_mux);
     return (int)v;
-}
-
-/* ---- 诊断接口 (排查用, 稳定后可删) ---- */
-
-int encoder_peek_raw(void)
-{
-    /* 同 consume 但不清零, 供诊断观察累加器当前值 */
-    portENTER_CRITICAL(&s_mux);
-    int32_t v = s_accum;
-    portEXIT_CRITICAL(&s_mux);
-    return (int)v;
-}
-
-uint32_t encoder_isr_hits(void)
-{
-    return s_isr_hits;
 }

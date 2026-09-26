@@ -13,5 +13,6 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=uninitialized
     -Wno-error=maybe-uninitialized
     # C++20 起 volatile 的 ++/--/复合赋值(+=等)被弃用, IDF 用 gnu++26 会报
-    # -Wvolatile。这里降级为警告, 允许 ISR/诊断计数器继续写 s_x++ / s_x += 1。
+    # -Wvolatile。这里降级为警告, 允许 ISR 里的计数器直接写 s_x++。
+    # (若想彻底消除该警告: 改成 x = x + 1; —— x += 1 同样被弃用)
     -Wno-error=volatile)
