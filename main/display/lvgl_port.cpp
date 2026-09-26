@@ -64,18 +64,29 @@ static void lvgl_port_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "LVGL task started");
-    uint32_t wait_ms = 0;
     while (1) {
         lvgl_port_lock();
-        wait_ms = lv_timer_handler();
+        uint32_t wait_ms = lv_timer_handler();
         lvgl_port_unlock();
-        if (wait_ms < 5) {
-            wait_ms = 5;      /* 避免忙循环空转 */
-        }
+
+        /* 先按 ms 夹紧上界: wait_ms 可能是 LV_NO_TIMER_READY(0xFFFFFFFF),
+         * 直接进 pdMS_TO_TICKS 会溢出。 */
         if (wait_ms > 500) {
             wait_ms = 500;    /* 避免长时间不调度 */
         }
-        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+
+        /* ★★ 关键: 必须保证换算后**至少 1 个 tick**, 不能只按 ms 夹紧。
+         *   CONFIG_FREERTOS_HZ=100 → pdMS_TO_TICKS(1..9) == 0,
+         *   而 vTaskDelay(0) 不会把 CPU 让给低优先级任务(IDLE1 是 prio 0)。
+         *   渲染耗时 > LVGL 定时器周期时(实测约 137ms vs 33ms),
+         *   lv_timer_handler() 会持续返回极小值(它总想立刻再跑一轮),
+         *   → 本任务 100% 占住 CPU1 → IDLE1 永不调度 → 5s 后 Task WDT 触发。
+         *   (原来写的是 wait_ms<5→5, 在 HZ=100 下 pdMS_TO_TICKS(5)==0, 等于没让出) */
+        TickType_t ticks = pdMS_TO_TICKS(wait_ms);
+        if (ticks < 1) {
+            ticks = 1;
+        }
+        vTaskDelay(ticks);
     }
 }
 
@@ -182,19 +193,41 @@ void lvgl_port_unlock(void)
     }
 }
 
-/* 确保"当前激活屏幕"是默认 group 的聚焦对象 (无锁, 须在持锁上下文调用)。
- * SquareLine 把切屏事件挂在屏幕对象本身, 只有被聚焦的屏幕才收得到 LV_EVENT_KEY。 */
+/* 确保"当前激活屏幕"是 group 里唯一且被聚焦的对象 (无锁, 须在持锁上下文调用)。
+ * SquareLine 把切屏事件挂在屏幕对象本身, 只有被聚焦的屏幕才收得到 LV_EVENT_KEY。
+ *
+ * ⚠️ 这里有两个**互相叠加**的坑 (2026-xx 源码级定位, 详见 HANDOFF §5):
+ *  1. `lv_group_focus_obj()` 内部第一件事就是 `lv_group_set_editing(g, false)`
+ *     (lv_group.c:242) —— **只要它真被调用, 编辑模式就被清掉**。
+ *     编辑模式没了, 旋转就退化成 navigate 模式: 只 `lv_group_focus_next/prev`,
+ *     不再 `lv_group_send_data(LV_KEY_LEFT/RIGHT)` → 屏幕完全无反应。
+ *  2. 若切屏后旧屏仍留在 group 里, 那么 `lv_group_get_focused(g) != scr` 恒成立,
+ *     于是 **每次** read_cb 都会调 `lv_group_focus_obj(scr)` → 每次都清编辑模式。
+ *
+ * 所以: 屏幕一变就把组清空重建(只留当前屏), 最后再无条件重申编辑模式(幂等)。 */
 static void lvgl_focus_active_screen_locked(lv_group_t *g)
 {
+    if (g == NULL) {
+        return;
+    }
     lv_obj_t *scr = lv_screen_active();
     if (scr == NULL) {
         return;
     }
-    if (lv_obj_get_group(scr) != g) {
+
+    /* 组里只留当前屏。稳定态下两个条件都成立 → 整块跳过, 无额外开销/无重绘。 */
+    if (lv_obj_get_group(scr) != g || lv_group_get_focused(g) != scr) {
+        lv_group_remove_all_objs(g);        /* 旧屏全部移出 (否则触发上面坑 2) */
         lv_group_add_obj(g, scr);
+        if (lv_group_get_focused(g) != scr) {
+            lv_group_focus_obj(scr);
+        }
     }
-    if (lv_group_get_focused(g) != scr) {
-        lv_group_focus_obj(scr);
+
+    /* 编辑模式: 旋转必须发 LV_KEY_LEFT/RIGHT (SquareLine 监听的是 LV_EVENT_KEY)。
+     * 放在最后 + 幂等 (内部 editing 相同则直接 return) → 自愈上面两个坑。 */
+    if (!lv_group_get_editing(g)) {
+        lv_group_set_editing(g, true);
     }
 }
 
@@ -218,10 +251,18 @@ void lvgl_port_send_encoder_dir(int dir)
  * 我们从 encoder 驱动取原始跳变, 按 ENC_KEY_STEP 换算成"格"填入 data->enc_diff。 */
 
 static int      s_enc_carry = 0;    /*!< 不足一格的跳变余数 (跨帧累积) */
+static volatile uint32_t s_read_calls = 0;   /* 诊断: read_cb 被调用次数 (稳定后可删) */
+
+/* 诊断快照: 只在 read_cb 内(持 LVGL 锁)更新, diag 任务无锁直接读
+ * (32bit 对齐读, 诊断用途足够)。稳定后连同上面一起删。 */
+static volatile uint32_t s_steps_total = 0;  /*!< 累计交付给 group 的 |格数| */
+static volatile uint32_t s_editing     = 0;  /*!< 组是否编辑模式 (1=会发 LV_KEY_LEFT/RIGHT) */
+static volatile uint32_t s_focus_ok    = 0;  /*!< 聚焦对象 == 当前激活屏 */
 
 static void lvgl_encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
+    s_read_calls++;
 
     int32_t raw = encoder_consume_raw();      /* 取走全部净跳变(含正负) */
     s_enc_carry += raw;
@@ -233,10 +274,14 @@ static void lvgl_encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->key      = LV_KEY_ENTER;                /* 编码器无按键, 占位 */
     data->state    = LV_INDEV_STATE_RELEASED;     /* 永远松开 (无按下源) */
 
+    s_steps_total += (uint32_t)((steps < 0) ? -steps : steps);
+
     /* 每轮确保聚焦当前屏: 切屏后新屏才能收到后续旋转键 */
     lv_group_t *g = lv_group_get_default();
     if (g != NULL) {
         lvgl_focus_active_screen_locked(g);
+        s_editing  = lv_group_get_editing(g) ? 1u : 0u;
+        s_focus_ok = (lv_group_get_focused(g) == lv_screen_active()) ? 1u : 0u;
     }
 }
 
@@ -266,4 +311,30 @@ esp_err_t lvgl_port_register_encoder_indev(void)
 
     ESP_LOGI(TAG, "encoder indev 注册完成 (编辑模式, 发 LV_KEY_LEFT/RIGHT)");
     return ESP_OK;
+}
+
+/* 诊断: read_cb 被调用的累计次数 (稳定后可删) */
+uint32_t lvgl_encoder_read_calls(void)
+{
+    return s_read_calls;
+}
+
+/* 诊断: 累计交付给 group 的 |格数| (稳定后可删)。
+ *  不涨 → 旋转没被消费成"格"; 涨了但屏幕不动 → 看下面 editing/focus_ok。 */
+uint32_t lvgl_encoder_steps_total(void)
+{
+    return s_steps_total;
+}
+
+/* 诊断: group 是否处于编辑模式 (1=旋转会发 LV_KEY_LEFT/RIGHT)。
+ *  ★ 若为 0, 旋转只会移动焦点, SquareLine 的切屏事件永远收不到, 表现=编码器完全无反应。 */
+uint32_t lvgl_encoder_editing(void)
+{
+    return s_editing;
+}
+
+/* 诊断: 聚焦对象是否就是当前激活屏 (1=是, 收得到 LV_EVENT_KEY)。 */
+uint32_t lvgl_encoder_focus_ok(void)
+{
+    return s_focus_ok;
 }

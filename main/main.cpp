@@ -40,6 +40,7 @@ static void on_button_edge(void *ctx, gpio_num_t pin, bool pressed)
     }
 }
 
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "========= Lanlink 阶段1: 输入事件化 =========");
@@ -64,8 +65,6 @@ extern "C" void app_main(void)
 
     ESP_LOGI(TAG, "初始化完成: 转编码器应能切屏; 按 IO10/IO8 应见按键日志");
 
-    /* app_main 收尾: 打印任务/内存快照便于验证 (本阶段无其他任务) */
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    ESP_LOGI(TAG, "空闲堆(初始化后): %u 字节", (unsigned)esp_get_free_heap_size());
+    /* app_main 收尾: 任务创建后自身无用,删除释放栈 */
     vTaskDelete(NULL);
 }

@@ -1,54 +1,67 @@
 # Lanlink 项目指南 (ESP32-S3 / ESP-IDF)
 
+> **接手项目请先读 [`HANDOFF.md`](HANDOFF.md)** —— 那里有当前状态、正在排查的问题、源码级验证过的坑。
+> 本文件只放长期有效的环境与约定。
+
 ## 项目概述
 
-基于 **ESP-IDF v6.0.1** 的 ESP32-S3 项目（名为 `Lanlink`）。当前处于起步阶段，`main/main.c` 中仅有空的 `app_main()` 入口。与用户交流时请使用**中文**。
+基于 **ESP-IDF v6.0.2** 的 ESP32-S3 语音助手设备（名为 `Lanlink`）：
+INMP441 麦克风 → I2S → WiFi → WebSocket → 服务器（讯飞 RTASR / LLM）→ ST7789 条屏 + LVGL 9.5 UI。
+
+与用户交流请使用**中文**。
 
 ## 关键环境
 
-- 目标芯片：`esp32s3`（双核 Xtensa LX7）
-- SDK：`D:/esp/v6.0.1/esp-idf`（IDF 版本 **v6.0.1**，API 较旧版本有差异）
-- Flash：2MB @ 80MHz；分区表：单应用（`partitions_singleapp.csv`）；**未启用 PSRAM**
-- 串口：`COM11`，波特率 115200
-- VS Code 使用官方 **ESP-IDF 扩展**，已有专用终端（ESP-IDF Build / Size）
+| 项 | 值 |
+|---|---|
+| 目标芯片 | `esp32s3`（双核 Xtensa LX7），**n16r8** = 16MB flash + 8MB Octal PSRAM |
+| SDK | IDF **v6.0.2**（`D:/esp/.espressif/v6.0.2/esp-idf`） |
+| LVGL | **9.5.0**（registry 组件，**锁定**，SquareLine 导出目标，勿升级） |
+| Flash | 16MB，自定义分区表 `partitions_custom.csv` |
+| PSRAM | Octal **80MHz** 已启用（有历史位翻转记录，见 HANDOFF §9） |
+| 构建/烧录 | **用户自行执行**，不要代为 build/flash |
+
+### 引脚（勿与 PSRAM 冲突）
+
+屏幕 SPI2: SCLK=21 MOSI=20 RST=19 DC=47 CS=48 BL=45 ｜ 编码器: A=7 B=15
+物理键: IO10(录音) IO8(服务) ｜ I2S: BCLK=11 WS=12 DIN=13
+
+⚠️ **n16r8 的 Octal PSRAM 占 GPIO33–37，外设绝不能用这几个脚。**
 
 ## 构建与运行
 
-在 VS Code 中优先使用 **ESP-IDF 扩展命令**（构建/烧录/监控/擦除）。终端中也可直接运行：
-
+用户使用 VS Code 的 ESP-IDF 扩展命令，或终端：
 ```bash
-idf.py build        # 构建（会自动重新运行 CMake）
-idf.py flash        # 烧录到 COM11
-idf.py monitor      # 串口监控，看 ESP_LOGx 输出
-idf.py build flash monitor
+idf.py build        # 构建
+idf.py flash monitor
 ```
 
-注意：新增源文件后，CMake 只有在重新配置时才会扫描到新文件——`idf.py build` 会自动完成这一步，无需手动删 `build/`。
+⚠️ **新增源文件后必须 `touch main/CMakeLists.txt`**：`SRC_DIRS` 用 `file(GLOB)` 只在 CMake 配置阶段扫描，
+不 touch 则新文件不参与编译，报链接期 `undefined reference`。
 
 ## 代码结构与约定
 
-- 应用代码放在 `main/`，通过 `main/CMakeLists.txt` 的 `idf_component_register()` 注册：
-  - 新增源文件时更新 `SRCS`（或用 `SRC_DIRS` 自动扫描目录）
-  - 新增头文件目录时更新 `INCLUDE_DIRS`
-- 应用入口为 `app_main(void)`；通用组件（freertos、log、esp_system 等）默认可用，无需在 `REQUIRES` 中声明
-- 使用 `ESP_LOGI/ESP_LOGE` 等日志宏输出，便于 `idf.py monitor` 查看
-- 目录下可建立 `driver/` 等子模块存放外设驱动（参考用户既往项目的习惯）
+- 应用代码在 `main/`，由 `main/CMakeLists.txt` 的 `idf_component_register()` 注册
+  （用 `SRC_DIRS` 自动扫描子目录；新增目录要加进 `SRC_DIRS`/`INCLUDE_DIRS`）
+- 驱动放 `main/drivers/`，显示相关放 `main/display/`，UI 为 SquareLine 导出的 `main/lvgl/`
+- 入口 `app_main(void)`；用 `ESP_LOGI/ESP_LOGE` 打日志
+- **`main/apikey.h` 含凭据，必须 gitignore，绝不提交**
 
 ## ESP-IDF 常见坑（务必注意）
 
-1. **FreeRTOS API 需要显式包含头文件**，否则报 `implicit declaration`：
-   ```c
-   #include "freertos/FreeRTOS.h"
-   #include "freertos/task.h"     // vTaskDelay, pdMS_TO_TICKS, xTaskCreate 等
-   ```
-2. `heap_caps_malloc` 需要 `#include "esp_heap_caps.h"`（或直接用 `malloc` + `esp_heap_caps` 按需分配）
-3. **C 与 C++ 混用**：`.cpp` 调用 `.c` 导出的函数时，头文件需用 `extern "C" { ... }` 包裹，否则链接报未定义符号
-4. 中断上下文（ISR）中禁用阻塞/延时 API；任务间通信用队列/信号量
-5. 定时器/延时单位注意：`pdMS_TO_TICKS(x)` 换算 tick（当前 `CONFIG_FREERTOS_HZ=100`）
-6. ESP32-S3 双核：任务默认可跑任意核，如需固定核用任务亲和性参数
-7. 修改 `sdkconfig` 相关配置后需重新构建；`sdkconfig` 已被 `.gitignore` 忽略，不入库
+1. **FreeRTOS API 需显式包含头文件**，否则 `implicit declaration`：
+   `freertos/FreeRTOS.h` + `freertos/task.h`
+2. **C/C++ 混用**：`.cpp` 调 `.c` 导出函数时头文件需 `extern "C" {}`
+3. **ISR 上下文禁用阻塞/延时 API**；任务间通信用队列/信号量
+4. `pdMS_TO_TICKS(x)` 注意 `CONFIG_FREERTOS_HZ`
+5. 多核：任务默认不绑核，需固定用亲和性参数（`xTaskCreatePinnedToCore`）
+6. **`_Atomic` 是 C11，C++ 不认** —— 用 `std::atomic` 或 `portMUX_TYPE` 临界区；
+   且 ISR 内优先用 `portENTER_CRITICAL_ISR`（`std::atomic` 在 Xtensa 不保证无锁）
+7. `sdkconfig` 已被 `.gitignore` 忽略，不入库；改配置需重新构建
 
 ## 测试与验证
 
-- 无独立单元测试框架配置；主要通过烧录后 `idf.py monitor` 查看日志验证
-- 涉及外设（GPIO/SPI/I2C/摄像头/屏幕）改动时，先确认引脚定义与硬件连线一致再烧录
+- 无单元测试框架；**通过烧录后 `idf.py monitor` 看日志验证**
+- 涉及外设（GPIO/SPI/I2S/屏幕）改动时，先确认引脚定义与硬件连线一致再烧录
+- LVGL 非线程安全：非 LVGL 任务访问 UI 必须 `lvgl_port_lock()`；
+  **但 LVGL 上下文内（回调/lv_timer）绝不能再加锁**（锁是非递归的，会自死锁）

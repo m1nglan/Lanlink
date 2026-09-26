@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #include "esp_err.h"
 
 /* ================================================================
@@ -33,3 +35,17 @@ void lvgl_port_send_encoder_dir(int dir);
  * 注册后: 旋转由 lv_timer_handler 内部自动读→驱动 group 导航/发键,
  * 无需再调 lvgl_port_send_encoder_dir。 */
 esp_err_t lvgl_port_register_encoder_indev(void);
+
+/*! 诊断: 编码器 read_cb 被 LVGL 调用的累计次数 (稳定后可删)。
+ *  若长时间为 0, 说明 indev 未被 LVGL 轮询。 */
+uint32_t lvgl_encoder_read_calls(void);
+
+/*! 诊断: 累计交付给 group 的 |格数| (稳定后可删) */
+uint32_t lvgl_encoder_steps_total(void);
+
+/*! 诊断: 默认 group 是否编辑模式 (1=旋转会发 LV_KEY_LEFT/RIGHT)。
+ *  ★ 为 0 时旋转只移动焦点, SquareLine 切屏事件收不到 → 表现=编码器无反应。 */
+uint32_t lvgl_encoder_editing(void);
+
+/*! 诊断: 聚焦对象是否就是当前激活屏 (1=是) */
+uint32_t lvgl_encoder_focus_ok(void);

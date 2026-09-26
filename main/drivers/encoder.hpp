@@ -36,3 +36,9 @@ esp_err_t encoder_init(void);
 /*! 取走自上次调用以来的净跳变数并清零 (原子, 可跨任务/ISR 安全调用)。
  *  正=顺时针(右), 负=逆时针(左)。消费方通常除以 ENC_KEY_STEP 得格数。 */
 int encoder_consume_raw(void);
+
+/*! 诊断: 查看当前累加值但不清零 (稳定后可删) */
+int encoder_peek_raw(void);
+
+/*! 诊断: ISR 累计触发次数 (稳定后可删) */
+uint32_t encoder_isr_hits(void);

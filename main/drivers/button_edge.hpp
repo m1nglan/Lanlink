@@ -26,7 +26,13 @@
  * ================================================================ */
 
 /* ------------------ 参数 ------------------ */
-#define BTN_EDGE_DEBOUNCE_MS   (15)   /*!< 稳定多久算消抖完成 (抖动期不断被中断重启推迟) */
+/*! 稳定多久算消抖完成 (抖动期不断被中断重启推迟)。
+ *  ★ 取值参照: 旧轮询驱动 button.hpp 用 BTN_DEBOUNCE_MS(10) x BTN_DEBOUNCE_N(5)
+ *    = **50ms 连续稳定** 才算一次有效沿, 那是本硬件上验证过不抖的值。
+ *    阶段 1 初版只给 15ms → 一次按下会打出多条 按下/释放 (机械抖动有 >15ms 的间歇)。
+ *  取值权衡: 越大越不抖, 但"按下/释放"上报也越晚。
+ *    按下延迟 ≈ 本值; 松开→voice_stop 最坏 ≈ 本值 + 音频帧边界 40ms (阶段 3 用) */
+#define BTN_EDGE_DEBOUNCE_MS   (50)
 #define BTN_EDGE_MAX_BUTTONS   (4)    /*!< 最多支持几个按键 */
 
 /*! 边沿回调: pressed=true 按下沿, false 释放沿。运行在 esp_timer 任务上下文。 */
@@ -41,3 +47,7 @@ typedef void (*btn_edge_cb_t)(void *ctx, gpio_num_t pin, bool pressed);
  * @return ESP_OK 成功
  */
 esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, void *ctx);
+
+/* ---- 诊断接口 (稳定后可删) ---- */
+uint32_t button_edge_isr_hits(void);    /*!< ISR 累计触发次数 */
+uint32_t button_edge_timer_hits(void);  /*!< 消抖 timer 累计到期次数 */
