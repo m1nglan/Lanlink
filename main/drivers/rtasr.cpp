@@ -78,62 +78,66 @@ esp_err_t RtAsr::end(uint32_t timeout_ms)
     return m_ws->send_text("{\"type\":\"end\"}", timeout_ms);
 }
 
+/* ============ 三个 type 的公共前半段 ============
+ * partial / final / revise 三个回调**只差"取到 text 之后干什么"**这一行,
+ * 前面的 cJSON 解析样板完全一样 —— 抽到这里, 免得改一处漏两处。
+ *
+ * 成功返回 true, 并把 root 通过 root_out 交回调用方去 cJSON_Delete;
+ * *text 指向 root 内部的内存, 所以调用方**必须先用 text、再 delete root**。 */
+static bool extract_text(const char *payload, const char **text, cJSON **root_out)
+{
+    cJSON *root = cJSON_Parse(payload);
+    if (root == NULL) {
+        return false;
+    }
+    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
+    if (text_item == NULL || !cJSON_IsString(text_item) || text_item->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return false;
+    }
+    *text     = text_item->valuestring;
+    *root_out = root;
+    return true;
+}
+
 /* 语音增量: 服务器每条 partial 只含新增字,追加到累积 buffer 并流式显示 */
 void RtAsr::handle_partial(const char *payload, int len, void *ctx)
 {
+    (void)len;
     RtAsr *self = static_cast<RtAsr *>(ctx);
-    if (self == nullptr) {
-        return;
+    const char *text = NULL;
+    cJSON *root = NULL;
+    if (self != nullptr && extract_text(payload, &text, &root)) {
+        self->accumulate(text, false);   /* is_final=false → 追加 */
+        cJSON_Delete(root);
     }
-
-    cJSON *root = cJSON_Parse(payload);
-    if (root == NULL) {
-        return;
-    }
-    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
-    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        self->accumulate(text_item->valuestring, false);   /* is_final=false → 追加 */
-    }
-    cJSON_Delete(root);
 }
 
-/* 语音修正: 服务器发完整当前文本,整体替换 buffer(修正错字),不回 IDLE/不触发完成 */
+/* 语音完成: 服务器发最终完整文本,覆盖 buffer 并触发完成回调 */
+void RtAsr::handle_final(const char *payload, int len, void *ctx)
+{
+    (void)len;
+    RtAsr *self = static_cast<RtAsr *>(ctx);
+    const char *text = NULL;
+    cJSON *root = NULL;
+    if (self != nullptr && extract_text(payload, &text, &root)) {
+        self->accumulate(text, true);    /* is_final=true → 覆盖 */
+        cJSON_Delete(root);
+    }
+}
+
+/* 语音修正: 服务器发完整当前文本,整体替换 buffer(修正错字),**不触发完成回调**
+ * ★ 别把它并进 handle_final: revise 故意不发 m_cb, 否则 UI 会收到假的"说完了" */
 void RtAsr::handle_revise(const char *payload, int len, void *ctx)
 {
     (void)len;
     RtAsr *self = static_cast<RtAsr *>(ctx);
-    if (self == nullptr) {
-        return;
+    const char *text = NULL;
+    cJSON *root = NULL;
+    if (self != nullptr && extract_text(payload, &text, &root)) {
+        self->revise(text);
+        cJSON_Delete(root);
     }
-
-    cJSON *root = cJSON_Parse(payload);
-    if (root == NULL) {
-        return;
-    }
-    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
-    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        self->revise(text_item->valuestring);   /* 修正: 替换 buffer,不触发完成 */
-    }
-    cJSON_Delete(root);
-}
-
-/* 语音完成: 服务器发最终完整文本,覆盖 buffer 并触发完成回调(回 IDLE + LLM 转发) */
-void RtAsr::handle_final(const char *payload, int len, void *ctx)
-{
-    RtAsr *self = static_cast<RtAsr *>(ctx);
-    if (self == nullptr) {
-        return;
-    }
-
-    cJSON *root = cJSON_Parse(payload);
-    if (root == NULL) {
-        return;
-    }
-    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
-    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        self->accumulate(text_item->valuestring, true);   /* is_final=true → 覆盖 */
-    }
-    cJSON_Delete(root);
 }
 
 /* 语音修正核心: 整体替换 buffer,换行重打整条(标记[修正]),不触发完成回调 */
@@ -146,7 +150,15 @@ void RtAsr::revise(const char *text)
 
 /* 累积核心: 增量追加(partial)或完整覆盖(final),并打印显示
  * is_final=false: strlcat 追加, 打印新增字(流式)
- * is_final=true:  strlcpy 覆盖, 打印完整结果(换行定格), 并触发 m_cb 完成回调 */
+ * is_final=true:  strlcpy 覆盖, 打印完整结果(换行定格), 并触发 m_cb
+ *
+ * ★ 本函数(以及 revise)是**在 WS 回调里**跑的, 而 WS 回调由 websocket_task
+ *   在**持有 esp_websocket_client 的 client->lock** 的情况下调用。
+ *   所以下面这两处 printf 属于"持锁期间的阻塞操作"(串口输出), 会拖住 voice_task
+ *   发音频。当前音频只有 40ms/帧、DMA 缓冲 128ms, 实测扛得住;
+ *   若将来出现"网络抖动时掉字", 优先把这里降级为 ESP_LOGD 或去掉
+ *   (文字已经通过 m_cb 交给 UI 了, 没必要再往串口打一遍)。
+ *   详见 HANDOFF §6「回调期间持 client->lock」。 */
 void RtAsr::accumulate(const char *text, bool is_final)
 {
     if (is_final) {
@@ -159,6 +171,6 @@ void RtAsr::accumulate(const char *text, bool is_final)
     fflush(stdout);
 
     if (m_cb != NULL) {
-        m_cb(s_result, is_final, m_cb_ctx);   /* final 时触发完成回调(回 IDLE + LLM 转发) */
+        m_cb(s_result, is_final, m_cb_ctx);   /* 交给调度层(现在是 UiBridge → 投队列) */
     }
 }

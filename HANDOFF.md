@@ -59,18 +59,16 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | 项 | 状态 |
 |---|---|
 | 分支 | `CH_rebuild_logic` |
-| 最新提交 | `080b442 GPIO改esp中断` |
-| 工作区 | 有未提交改动（阶段 1 全部成果 + 清理，待 commit） |
-| 阶段 | **重构阶段 1 完成**（输入事件化：编码器 + 按键均已在硬件上验证通过） |
+| 最新提交 | `763f5a2 修复抖动_阶段1完成` |
+| 工作区 | 有未提交改动（阶段 1 收尾 + 阶段 0 + **阶段 2**，**待构建/烧录验证**） |
+| 阶段 | **阶段 0 + 阶段 1 + 阶段 2 代码已完成**；阶段 2 尚未上机验证 |
 
-### 阶段 1 成果一句话
+### 各阶段成果
 
-`main/main.cpp` 是**阶段 1 最小验证版**：只初始化 LVGL + 编码器 + 按键，
-**没有 WiFi / WS / 语音 / LLM**（阶段 2+ 的事）。已实测：
+**阶段 1（已硬件验证）** —— 输入事件化：
 
 - ✅ 转编码器 → LVGL indev → 切屏正常（**无独立任务、无跨任务锁**）
 - ✅ 按 IO10 / IO8 → GPIO 中断 + esp_timer 消抖 → 边沿回调正常（**无轮询**）
-- ✅ 全工程只有 `lvgl` 一个自建任务（"无 encoder 任务"这条达标）
 - ✅ 无 Guru Meditation / 死锁 / Task WDT
 
 期间修掉的 3 个坑（都已记入 §5 / §6，务必读）：
@@ -78,15 +76,22 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 2. **Task WDT 饿死 IDLE1** —— `pdMS_TO_TICKS(5)` 在 `HZ=100` 下 == 0，`vTaskDelay(0)` 不让出（§6）
 3. **按键大抖动** —— 消抖 15ms 不够，本硬件验证值是 50ms（§5.3）
 
-### ⚠️ 进度和 REBUILD.md 的阶段划分对不上
+**阶段 0（基础设施）** —— 已补：
 
-**阶段 0 基本没做**：`main/business/` 不存在、`CMakeLists.txt` 没有 `"business"`、
-`ws.cpp::init()` 没补 `.task_core_id/.task_prio`、`app_fsm.{hpp,cpp}` 与
-`button.{hpp,cpp}` 仍在 `drivers/` 里被 glob 照常编译。
+- ✅ `main/business/` 已建；`CMakeLists.txt` 的 `SRC_DIRS`/`INCLUDE_DIRS` 已加 `"business"`
+- ✅ `ws.cpp::init()` 已钉核（注意还须设 `task_core_id_set`，见 §6）
+- ✅ `app_fsm.{hpp,cpp}`、`button.{hpp,cpp}` 已改名 `*.txt` 留档（不再参与编译）
+
+**阶段 2（骨架完成，未上机）** —— ws_keeper + UiBridge + voice：
+
+- ✅ 三条队列（`cmd_q` / `resp_q` / `stream_q`）+ asr 回调接线 + UI 消费 timer
+- ✅ `ws_keeper_task`（连接生命周期）、`voice_task`（命令驱动，**假会话不采音**）
+- ✅ `main.cpp` 重写：WiFi + WS + 三任务 + 按键接线
+- ⬜ **待验证**：冷启动建连 + 切 text；按 IO10 看 start/end 发出无错
 
 ### 👉 下一步
 
-先补阶段 0，再做**阶段 2**（ws_keeper + UiBridge + voice 骨干）。
+**构建 + 烧录验证阶段 2**（验证清单见 §9），然后进**阶段 3**（真采音闭环）。
 
 ---
 
@@ -97,11 +102,29 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 核心思路（一句话）：**业务从"状态机轮询"改为"事件/命令驱动"**，
 `RtAsr`/`Llm`/`WS` 协议层几乎不动（干净无状态），重写的是调度层（`AppFsm` 退役）。
 
-阶段划分：~~0 基础设施~~（**未做，需补**）→ ~~1 输入事件化~~（**已完成**）→ **2 ws_keeper+UiBridge（下一个）** → 3 语音采音闭环 → 4 清理。
+阶段划分：~~0 基础设施~~（**已补**）→ ~~1 输入事件化~~（**已硬件验证**）→ ~~2 ws_keeper+UiBridge~~（**骨架完成，待上机**）→ **3 语音采音闭环（下一个）** → 4 清理。
 
-> ⚠️ 阶段 2 会往 **CPU0** 一次性加 3 个东西（`ws_keeper` prio5、`voice` prio6、
-> 组件自带 `websocket_task` prio5）。§6 那个 `pdMS_TO_TICKS` 陷阱会**从 CPU1 搬到 CPU0**，
-> 新任务一律用"夹紧 tick 值"的写法，否则 IDLE0 会被饿死、Task WDT 照炸。
+### 阶段 2 的任务/上下文地图（**这是读代码的入口**）
+
+| 任务 | 核 | prio | 栈 | 职责 |
+|---|---|---|---|---|
+| `lvgl` | 1 | 2 | 6K | 渲染 + 编码器 indev + **UI 队列消费 timer(50ms)** |
+| `ws_keeper` | 0 | 5 | 8K | WS 连接生命周期：建连 / 重连 / ping 保活 / 切 text |
+| `voice` | 0 | 6 | 6K | 命令驱动语音会话（阶段 2 是**假会话**，不采音） |
+| `websocket_task` | 0 | 5 | 4K | **组件自带**：收包 → 同步跑 WS 回调（在 `ws.cpp` 钉核） |
+| ~~按键 / 编码器~~ | — | — | — | **无任务**：GPIO 中断 + esp_timer / LVGL indev |
+
+数据流（**跨任务只走队列；发送是同步函数调用**）：
+
+```
+按键(中断→esp_timer) --cmd_q--> voice_task --asr.start/send_audio/end--> 服务器
+服务器 --> websocket_task(回调) --resp_q/stream_q--> lvgl 任务(UI timer) --> 屏幕
+```
+
+> ⚠️ 阶段 2 往 **CPU0** 加了 3 个东西（`ws_keeper` prio5、`voice` prio6、组件 `websocket_task` prio5）。
+> §6 那个 `pdMS_TO_TICKS` 陷阱已经从 CPU1 搬到 CPU0 —— 新任务一律用"夹紧 tick 值"的写法，
+> 否则 IDLE0 会被饿死、Task WDT 照炸。（`drain_queues` 里也已把 1KB 消息体改成 `static` 给
+> 6K 栈让位。）
 
 ---
 
@@ -238,6 +261,26 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | `spi_bus_dma_memory_alloc(host,sz,caps)` 支持 `MALLOC_CAP_SPIRAM` | SPI2 + GDMA 可直读 PSRAM 绘图缓冲（自动 cache sync） |
 | **`SRC_DIRS` + `file(GLOB)` 只在 CMake 配置阶段扫描** | **新增源文件后必须 `touch main/CMakeLists.txt`**，否则新文件不参与编译→链接期 undefined reference |
 
+### esp_websocket_client（**收发链路的全部坑，都是读组件源码确认的**）
+
+| 事实 | 含义 |
+|---|---|
+| **钉核必须设 `task_core_id_set = true`**（`esp_websocket_client.h:129`）。组件实现是 `if (config->task_core_id_set) cfg->task_core_id = ...; else cfg->task_core_id = tskNO_AFFINITY;`（`esp_websocket_client.c:369-372`） | ⚠️ **REBUILD.md 漏了这个字段**：只写 `cfg.task_core_id = 0` **无效**，会被当成"未设置"而走 `tskNO_AFFINITY`。因为 0 本身是合法核号，所以组件专门加了个 bool 开关。`ws.cpp::init()` 已按要求写全 |
+| 组件任务默认 `WEBSOCKET_TASK_CORE_ID=tskNO_AFFINITY`、`PRIORITY=5`、`STACK=4K`（`esp_websocket_client.c:33-35`） | `task_prio/task_stack` 留 0 会用这些默认值 |
+| **回调跑在组件任务里，且是同步内联**：`dispatch_event()` 先 `esp_event_post_to(...)` 再**紧接着** `esp_event_loop_run(handle, 0)`；而 event loop 建的时候 `.task_name = NULL`（不建任务）→ 在调用者(websocket_task)上下文同步执行 | ✅ REBUILD 坑#1 属实。我们的 `ws_keeper`/`voice_task` **完全不参与收包** |
+| **回调期间持有 `client->lock`**：主循环是 `xSemaphoreTakeRecursive(client->lock)` → `recv()` → 里面调 `dispatch_event()`（`esp_websocket_client.c:1397-1402` / `1118`） | ★★ **回调里绝对不能阻塞**。所以 `stream_q` 用 `xQueueOverwrite`（天生不阻塞），`resp_q` 必须 `xQueueSend(..., 0)`。**用 `portMAX_DELAY` 会让整个 WS 收发死锁**（TX/RX 共用这把锁）。另：回调里别做耗时 `printf` |
+| `CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK` **未开** → `client->lock` 一把递归锁 TX/RX 共用（`esp_websocket_client.c:816`） | ✅ REBUILD 坑#2 属实 → `voice_task`/`ws_keeper`/`websocket_task` **必须同核 CPU0**。递归锁保证了**同任务重入不死锁** |
+| `WS::set_handler()` 按 `type` **自带去重**；`WS::deinit()` **不清 handler 表** | → **重连不需要重新 `asr.attach()`**，handler 表挂在 WS 单例上会一直保留，`init()` 会把它们挂到新 client 的 event loop 上 |
+| 组件配了 `disable_auto_reconnect = true` / `disable_pingpong_discon = true` | **重连和保活必须由我们的 `ws_keeper` 负责**，别指望组件 |
+
+### 业务层铁律
+
+| 事实 | 含义 |
+|---|---|
+| ★ **`partial` 的路由只认 `WS::m_service`**（`ws.cpp:313`），而 `RtAsr::switch_service()` **只发消息、不改 `m_service`**（`rtasr.cpp:42`） | 切服务必须**成对**：`ws.set_service("text")` **+** `asr.switch_service("text", ...)`。漏第一句 → 语音 partial 被送去 chat 槽位（阶段2 是 NULL）→ `if (h != NULL)` 无 else、不打日志 → **识别文字静默消失**。旧代码在 `app_fsm.cpp:125-126` 就是成对写的 |
+| `RtAsr::handle_partial/final/revise` 三者只差"取到 text 之后干什么" | 已抽成 `extract_text()` + 三个薄壳（`rtasr.cpp`）。**别把 `revise` 并进 `final`**：`revise` 故意不触发 `m_cb`，合并会让 UI 收到假的"说完了" |
+| `WS::dispatch_msg` 里 `partial` **不走查表**，因为 `type=="partial"` 被"语音"和"LLM"两个服务共用，一维 `type` 分不出来 | 见上一条 |
+
 ### 已确认可用的重载/配置
 
 - `ui_chat` 屏**已有现成对话控件**：`ui_metext`（我说的，绿气泡）/ `ui_restext`（回复，深色气泡）——微信式布局已画好，等接数据。
@@ -290,10 +333,24 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
   `lcd_display.hpp` 过时引脚注释与无用的 `ENC_A_PIN` 宏已清理；
   `lvgl_port_send_encoder_dir()` 与 `encoder_dir_t` 死代码已删除。
   **输入链路若再出问题，诊断需重新添加**（照 §5.2 末尾的"教训"写）。
-- 📌 **未做**：阶段 0 的基础设施（`main/business/`、`CMakeLists.txt` 加 `"business"`、
-  `ws.cpp` 补 `.task_core_id/.task_prio`、`app_fsm`/`button` 留档改名）。
+- 📌 **阶段 0 / 2 已完成，待上机验证**。验证清单（烧录后按此看串口）：
+  1. 构建过；串口**无** `handler 表已满`（实测只需 3 个 handler 位，表深 4）
+  2. `ui_bridge: 就绪: cmd_q=4 resp_q=16 stream_q=1`
+  3. `ws_keeper: 网关已连接, 已切到 text 服务`（服务器应回 `svc_ok`）
+  4. **阶段 1 无回归**：转编码器仍切屏、按键仍一次一沿、**无 Task WDT**
+  5. 按 IO10 → `voice: 已发送 start` → 1s 后 `已发送 end`（假会话，不采音）
+  6. 按 IO8 → `voice: 收到 CMD_SVC_SWITCH (IO8) —— 本阶段只留钩子`
+  7. `ui_bridge: [结果] kind=...`（若服务器返回 final）
+  8. 拔网线 → `ws_keeper: 连接已失效, 1.0s 后重连` → 恢复
+- 📌 **阶段 3 待做**：`voice_session` 的假会话换成真采音循环（骨架已写在 `voice.cpp` 注释里，
+  含三个必须注意的边界：读失败不能发包 / STOP 检查别被 `continue` 跳过 / 发送阻塞会吃 128ms DMA 余量）。
+- 📌 **阶段 4 待做（清理）**：`rtasr.cpp` 里 `printf` 在 WS 回调(持 `client->lock`)里跑，
+  网络抖动时可能拖住发音频 → 降级为 `ESP_LOGD`；`queue` 是否改 `xQueueCreateStatic` + PSRAM。
 - 📌 **已知行为（未改，用户明确要求先不动）**：`lv_indev_read()` 在屏幕动画期间
   （`prev_scr != NULL`，约 500ms）会在调 `read_cb` **之前** return，所以动画期间转的跳变会
   **攒在 `s_accum` 里**，动画结束后一次结算 → `enc_diff` 可能是十几格 → `indev_encoder_proc`
   的 `for` 循环连发多次键 → **可能连跳好几屏**。
   若要治：在 `lvgl_encoder_read_cb` 里把每轮 `steps` 夹到 ±1（会牺牲"快转=快切"的手感）。
+- 📌 **UI 性能**：FULL 双整屏缓冲(2×106KB PSRAM) + 40MHz SPI + loading 屏无限旋转动画
+  → 实测每轮 `lv_timer_handler()` 约 **137ms（≈7 FPS）**，CPU1 基本被渲染吃满。
+  不致命（WDT 已用 tick 夹紧修好），但要提速得改渲染模式（阶段 4）。

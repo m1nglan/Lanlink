@@ -36,8 +36,26 @@ esp_err_t WS::init(void)
     cfg.uri = uri;
     cfg.buffer_size = 8192;                         /*!< 接收缓冲(partial 又小又密,调大防丢) */
     cfg.network_timeout_ms = WS_CONNECT_TIMEOUT_MS;
-    cfg.disable_auto_reconnect = true;              /*!< 断线交给上层重建 */
+    cfg.disable_auto_reconnect = true;              /*!< 断线交给上层重建(ws_keeper) */
     cfg.disable_pingpong_discon = true;             /*!< 禁用协议层 PONG 超时 abort(保活交给上层) */
+
+    /* ★ 把组件的收包任务钉到 CPU0, 与 voice_task / ws_keeper 同核。
+     *   理由: 组件 TX/RX **共用一把 client->lock**
+     *   (CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK 未开), 同核能把抢锁退化成
+     *   核内短临界区, 避免跨核缓存同步开销。
+     *
+     *   ⚠️ 必须同时设 task_core_id_set! 组件实现是:
+     *        if (config->task_core_id_set) cfg->task_core_id = config->task_core_id;
+     *        else                          cfg->task_core_id = tskNO_AFFINITY;   ← 默认不绑核
+     *      因为 0 本身是合法核号, 没法用 0 表示"没设置", 所以组件专门加了
+     *      一个 bool 开关(esp_websocket_client.h:129)。
+     *      只写 task_core_id = 0 是**无效的**, 会被当成未设置而走 tskNO_AFFINITY。
+     *
+     *   task_prio 留 0: 组件默认会给 WEBSOCKET_TASK_PRIORITY(=5)。
+     *   task_stack 留 0: 组件默认会给 WEBSOCKET_TASK_STACK(=4K)。 */
+    cfg.task_core_id_set = true;
+    cfg.task_core_id     = 0;
+    cfg.task_prio        = 5;                       /*!< 与默认值一致, 写出来只为明确 */
 
     m_ws = esp_websocket_client_init(&cfg);
     if (m_ws == NULL) {

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanlink 语音全流程 (按下按键 → 屏幕上屏)</title>
+<style>
+  :root{
+    --hw:#6b7280;      /* 用户 / 硬件 */
+    --isr:#dc2626;     /* GPIO 中断 */
+    --tmr:#ea580c;     /* esp_timer 任务 */
+    --voice:#2563eb;   /* voice_task (CPU0) */
+    --ws:#7c3aed;      /* websocket_task (CPU0) 组件任务 */
+    --lvgl:#059669;    /* lvgl 任务 (CPU1) */
+    --queue:#0891b2;   /* 队列 */
+    --net:#b45309;     /* 网络 / 服务器 */
+    --bg:#f6f7f9;
+    --card:#ffffff;
+    --line:#d7dbe0;
+    --txt:#1f2328;
+    --dim:#5b6472;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:28px 20px 60px;
+    background:var(--bg); color:var(--txt);
+    font:15px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  }
+  .wrap{max-width:1020px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:13.5px;margin-bottom:18px}
+
+  /* ---------- 图例 ---------- */
+  .legend{
+    display:flex;flex-wrap:wrap;gap:8px 16px;
+    background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:12px 14px;margin-bottom:22px;font-size:13px;
+  }
+  .legend b{font-weight:600}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:middle}
+
+  /* ---------- 阶段分隔 ---------- */
+  .phase{
+    display:flex;align-items:center;gap:12px;
+    margin:30px 0 14px;font-size:16px;font-weight:700;
+  }
+  .phase::after{content:"";flex:1;height:2px;background:var(--line)}
+  .phase .tag{
+    font-size:11.5px;font-weight:600;color:#fff;background:#374151;
+    padding:2px 8px;border-radius:20px;letter-spacing:.3px;
+  }
+
+  /* ---------- 步骤卡片 ---------- */
+  .flow{position:relative}
+  .step{
+    display:grid;grid-template-columns:132px 26px 1fr;
+    align-items:stretch;position:relative;
+  }
+  /* 左侧上下文泳道 */
+  .ctx{
+    display:flex;align-items:flex-start;justify-content:flex-end;
+    padding:12px 0 0;
+  }
+  .ctx span{
+    font-size:11.5px;font-weight:700;line-height:1.3;text-align:right;
+    color:var(--c);white-space:pre-line;
+  }
+  /* 中间竖线 + 箭头 */
+  .rail{position:relative}
+  .rail::before{
+    content:"";position:absolute;left:50%;top:0;bottom:0;
+    width:2px;background:var(--line);transform:translateX(-50%);
+  }
+  .step:first-child .rail::before{top:14px}
+  .step:last-child  .rail::before{bottom:auto;height:14px}
+  .rail::after{
+    content:"";position:absolute;left:50%;bottom:6px;
+    width:0;height:0;transform:translateX(-50%);
+    border-left:5px solid transparent;border-right:5px solid transparent;
+    border-top:7px solid var(--line);
+  }
+  /* 右侧卡片 */
+  .card{
+    background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);
+    border-radius:8px;padding:10px 14px;margin:6px 0;
+    font-size:13.5px;
+  }
+  .card .fn{font-family:ui-monospace,Consolas,monospace;font-size:13px;font-weight:700;color:var(--c)}
+  .card .note{color:var(--dim);font-size:12.5px;margin-top:3px}
+  .card code{
+    background:#eef1f4;border-radius:4px;padding:1px 5px;
+    font-family:ui-monospace,Consolas,monospace;font-size:12.5px;
+  }
+  .card ul{margin:4px 0 0;padding-left:18px}
+  .card li{margin:2px 0}
+
+  /* 队列跳: 醒目横条 (注意: 它是 .flow 的直接子元素, 不在 .step 网格内) */
+  .hop{
+    display:flex;align-items:center;gap:10px;
+    margin:2px 0;font-size:12.5px;font-weight:700;color:var(--queue);
+    padding-left:158px;              /* 与右侧卡片对齐: 132px 泳道 + 26px 导轨 */
+  }
+  .hop .bar{flex:1;border-top:2px dashed var(--queue)}
+  .hop code{background:#e6f6fa;color:#0e7490;border-radius:4px;padding:2px 7px;
+            font-family:ui-monospace,Consolas,monospace;white-space:nowrap}
+
+  /* 网络跳 */
+  .net{
+    display:flex;align-items:center;gap:10px;
+    margin:6px 0;font-size:12px;font-weight:700;color:var(--net);
+    padding-left:158px;
+  }
+  .net .bar{flex:1;border-top:2px dotted var(--net)}
+  .net .lbl{white-space:nowrap}
+
+  /* 未来 / 未做 */
+  .future{opacity:.55}
+  .future .card{border-style:dashed}
+  .badge-future{
+    font-size:10.5px;font-weight:700;color:#6b7280;border:1px solid #cbd2d9;
+    border-radius:20px;padding:1px 7px;margin-left:6px;
+  }
+  .badge-now{background:#dcfce7;color:#166534;border-radius:20px;padding:1px 7px;font-size:10.5px;font-weight:700;margin-left:6px}
+
+  /* ---------- 结论区 ---------- */
+  .rules{
+    margin-top:34px;background:var(--card);border:1px solid var(--line);
+    border-radius:10px;padding:16px 18px;
+  }
+  .rules h2{font-size:15px;margin:0 0 10px}
+  .rules table{border-collapse:collapse;width:100%;font-size:13px}
+  .rules td{border-top:1px solid var(--line);padding:7px 8px;vertical-align:top}
+  .rules td:first-child{width:38%;font-weight:600}
+  .kbd{font-family:ui-monospace,Consolas,monospace;background:#eef1f4;border-radius:4px;padding:1px 5px;font-size:12.5px}
+  .foot{margin-top:16px;color:var(--dim);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Lanlink｜语音识别全流程</h1>
+  <div class="sub">从「按住录音键」到「屏幕上屏」 —— 颜色表示<strong>这一步跑在哪个任务/上下文里</strong></div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--hw)"></i><b>用户 / 硬件</b></span>
+    <span><i class="dot" style="background:var(--isr)"></i><b>GPIO 中断</b>（不是任务）</span>
+    <span><i class="dot" style="background:var(--tmr)"></i><b>esp_timer 任务</b></span>
+    <span><i class="dot" style="background:var(--voice)"></i><b>voice_task</b>（CPU0 prio6）</span>
+    <span><i class="dot" style="background:var(--ws)"></i><b>websocket_task</b>（CPU0 prio5，ESP 组件自带）</span>
+    <span><i class="dot" style="background:var(--lvgl)"></i><b>lvgl 任务</b>（CPU1 prio2）</span>
+    <span><i class="dot" style="background:var(--queue)"></i><b>队列</b>（跨任务唯一通道）</span>
+  </div>
+
+  <!-- ======================= 上行 ======================= -->
+  <div class="phase">① 上行：按键 → 采音 → 发给服务器 <span class="tag">阶段 2 / 3</span></div>
+
+  <div class="flow">
+
+    <div class="step" style="--c:var(--hw)">
+      <div class="ctx"><span>用户</span></div>
+      <div class="rail"></div>
+      <div class="card"><span class="fn">按住 IO10</span>（录音键）<div class="note">按下为低，内部上拉</div></div>
+    </div>
+
+    <div class="step" style="--c:var(--isr)">
+      <div class="ctx"><span>GPIO 中断</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">button_edge_isr()</span>
+        <div class="note">只做一件事：<code>esp_timer_restart(tmr, 50ms)</code> —— 抖动期间不断推迟，直到电平稳定 50ms</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--tmr)">
+      <div class="ctx"><span>esp_timer
+任务</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">button_edge_timer_cb()</span>
+        <div class="note">读稳定电平 → 与上次比较 → 变了才回调 <code>on_button_edge(pressed=true)</code></div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--tmr)">
+      <div class="ctx"><span>esp_timer
+任务</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">UiBridge::voice_start()</span>
+        <div class="note">往命令队列投一条消息，<strong>非阻塞</strong>，投完立刻返回</div>
+      </div>
+    </div>
+
+    <div class="hop"><span class="bar"></span><code>cmd_q</code> 队列<span class="bar"></span></div>
+
+    <div class="step" style="--c:var(--voice)">
+      <div class="ctx"><span>voice_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">xQueueReceive(cmd_q)</span> 被唤醒
+        <div class="note">平时它<strong>睡在这条队列上</strong>（<code>portMAX_DELAY</code>），收不到命令就零 CPU 占用</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--voice)">
+      <div class="ctx"><span>voice_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">voice_session() 建立会话</span>
+        <ul>
+          <li>等 WS 连接就绪（超时 15s）</li>
+          <li><code>ws.set_service("text")</code> ← 决定 partial 往哪路由</li>
+          <li><code>asr.switch_service("text")</code> ← 通知服务器切服务</li>
+          <li>等 ~300ms 收 <code>svc_ok</code></li>
+        </ul>
+        <div class="note">这两句<strong>必须成对</strong>，漏第一句 → 识别文字一条都收不到（不报错）</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--voice)">
+      <div class="ctx"><span>voice_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">mic.start() + asr.start()</span>
+        <div class="note">发 <code>{"type":"start"}</code> → <code>WS::send_text()</code> → <code>esp_websocket_client_send_text()</code></div>
+      </div>
+    </div>
+
+    <div class="net"><span class="bar"></span><span class="lbl">▶ 网络：同步函数调用直接写进 socket（没有任务切换）</span><span class="bar"></span></div>
+
+    <div class="step" style="--c:var(--hw)">
+      <div class="ctx"><span>用户</span></div>
+      <div class="rail"></div>
+      <div class="card"><span class="fn">说话</span></div>
+    </div>
+
+    <div class="step" style="--c:var(--voice)">
+      <div class="ctx"><span>voice_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">采音循环（每 40ms 一帧）</span>
+        <ul>
+          <li><code>mic.read_frame(pcm, 1280, 40ms)</code> ← 收音就在这个任务里</li>
+          <li>帧头 <strong>peek 一次</strong> <code>cmd_q</code>，看有没有 STOP</li>
+          <li><code>asr.send_audio(pcm, 1280)</code> → 二进制帧发出</li>
+          <li>若 <code>!ws.is_connected()</code> → 中止会话</li>
+        </ul>
+        <div class="note">收音和发送在<strong>同一个任务、同一个循环</strong>里，中间不需要 StreamBuffer</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--hw)">
+      <div class="ctx"><span>用户</span></div>
+      <div class="rail"></div>
+      <div class="card"><span class="fn">松开 IO10</span></div>
+    </div>
+
+    <div class="step" style="--c:var(--tmr)">
+      <div class="ctx"><span>中断 → esp_timer</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">on_button_edge(pressed=false)</span> → <code>voice_stop()</code>
+        <div class="note">同样只是投一条 <code>CMD_VOICE_STOP</code>，不打断采音</div>
+      </div>
+    </div>
+
+    <div class="hop"><span class="bar"></span><code>cmd_q</code> 队列<span class="bar"></span></div>
+
+    <div class="step" style="--c:var(--voice)">
+      <div class="ctx"><span>voice_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">下一帧帧头 peek 到 STOP</span>
+        <div class="note">→ <code>asr.end()</code> 发 <code>{"type":"end"}</code> → <code>mic.stop()</code> → 回到 <code>xQueueReceive</code> 睡觉</div>
+        <div class="note">最坏延迟 = 帧边界 40ms + 消抖 50ms ≈ 90ms</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ======================= 下行 ======================= -->
+  <div class="phase">② 下行：服务器回包 → 屏幕上屏 <span class="tag">阶段 2（先只 log）</span></div>
+
+  <div class="flow">
+
+    <div class="net"><span class="bar"></span><span class="lbl">◀ 网络：服务器推 <code>{"type":"partial",...}</code> / <code>{"type":"final",...}</code></span><span class="bar"></span></div>
+
+    <div class="step" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task
+（组件任务）</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">esp_websocket_client_task() 收字节</span>
+        <div class="note">组件自己的任务，<strong>永不退出</strong>；我们的代码从不调 <code>recv()</code></div>
+        <div class="note">⚠️ 它<strong>持着 client-&gt;lock</strong> 去调 recv —— 所以下面整条回调链都在这把锁里跑</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">esp_event_post_to() + esp_event_loop_run(0)</span>
+        <div class="note">事件循环<strong>没有自己的任务</strong>（建时 <code>task_name = NULL</code>），所以在<strong>当前任务里同步</strong>派发 → 调用我们的 <code>WS::ws_event_handler()</code></div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">WS::handle_data()</span>
+        <div class="note">粘包 / 分帧：累积到 8KB 缓冲，按花括号配对切出<strong>一条完整 JSON</strong></div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">WS::dispatch_msg() —— 按 <code>type</code> 字段分发</span>
+        <ul>
+          <li><code>"error" / "svc_ok" / "pong"</code> → WS 自己吃掉</li>
+          <li><code>"partial"</code> → 按 <code>WS::m_service</code> 路由到 <code>RtAsr::handle_partial()</code>（<strong>不走表</strong>）</li>
+          <li><code>"final"</code> → 查表 → <code>RtAsr::handle_final()</code></li>
+        </ul>
+        <div class="note">传进去的是「<strong>完整 JSON 字符串</strong> + 注册时给的 <code>this</code> 指针」，不是 text 字段</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">RtAsr::accumulate()</span>
+        <div class="note">partial → <code>strlcat</code> 追加增量；final → <code>strlcpy</code> 覆盖成整句。攒在 <code>s_result[1024]</code>（PSRAM），然后调 <code>m_cb(整句, is_final)</code></div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">UiBridge::on_asr_result()</span>
+        <ul>
+          <li>partial → <code>xQueueOverwrite(stream_q)</code> —— <strong>永不阻塞、永不失败</strong>，只留最新那句</li>
+          <li>final → <code>xQueueSend(resp_q, 0)</code> —— 超时设 0，满了就丢</li>
+        </ul>
+        <div class="note">⚠️ 这里<strong>绝不能阻塞</strong>：回调正持着 client-&gt;lock，一卡住整个 WS 收发全停</div>
+      </div>
+    </div>
+
+    <div class="hop"><span class="bar"></span><code>stream_q</code>（覆盖）/ <code>resp_q</code>（可靠）<span class="bar"></span></div>
+
+    <div class="step" style="--c:var(--lvgl)">
+      <div class="ctx"><span>lvgl 任务</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">lv_timer 回调（每 50ms）</span>
+        <div class="note"><code>xQueueReceive(stream_q, &amp;s, 0)</code> —— <strong>队列非空才刷</strong>，空就跳过（不 malloc、不重绘）</div>
+        <div class="note">⚠️ 此时 LVGL 锁<strong>已被持有</strong> → 回调里<strong>禁止</strong>再调 <code>lvgl_port_lock()</code>（非递归锁 → 自死锁）</div>
+      </div>
+    </div>
+
+    <div class="step" style="--c:var(--lvgl)">
+      <div class="ctx"><span>lvgl 任务</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">lv_label_set_text(ui_metext / ui_restext, text)</span>
+        <div class="note">→ LVGL 重绘 → flush 回调 → SPI2 → 屏幕 <span class="badge-now">阶段 2 只 log</span> <span class="badge-future">阶段 3+ 你来写</span></div>
+      </div>
+    </div>
+
+    <div class="step future" style="--c:var(--hw)">
+      <div class="ctx"><span>用户</span></div>
+      <div class="rail"></div>
+      <div class="card"><span class="fn">看到识别的字冒出来</span></div>
+    </div>
+
+    <div class="step future" style="--c:var(--ws)">
+      <div class="ctx"><span>websocket_task</span></div>
+      <div class="rail"></div>
+      <div class="card">
+        <span class="fn">（可选）LLM 回复链 <span class="badge-future">本次不做</span></span>
+        <div class="note">服务器发 <code>{"type":"reply"}</code> → <code>Llm::handle_reply()</code> → <code>resp_q</code> → UI。<br>本次只在 <code>llm_chain.hpp</code> 留声明，不接。</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ======================= 约束 ======================= -->
+  <div class="rules">
+    <h2>四条必须记住的硬约束（都在图里有对应位置）</h2>
+    <table>
+      <tr>
+        <td>回调里<strong>禁止阻塞</strong></td>
+        <td>整条回调链都持着 <span class="kbd">client-&gt;lock</span>。所以 <span class="kbd">stream_q</span> 用 <span class="kbd">xQueueOverwrite</span>（天生不阻塞），<span class="kbd">resp_q</span> 必须 <span class="kbd">xQueueSend(..., 0)</span>。<strong>用 <span class="kbd">portMAX_DELAY</span> 会让整个 WS 死锁。</strong></td>
+      </tr>
+      <tr>
+        <td>收发<strong>同核 CPU0</strong></td>
+        <td><span class="kbd">voice_task</span> 与 <span class="kbd">websocket_task</span> 共用那一把锁 → 同核才能把跨核缓存同步变成核内短临界区。组件任务默认不绑核，要在 <span class="kbd">ws.cpp</span> 里设 <span class="kbd">task_core_id_set = true; task_core_id = 0;</span></td>
+      </tr>
+      <tr>
+        <td>LVGL 锁<strong>非递归</strong></td>
+        <td><span class="kbd">lv_timer</span> / <span class="kbd">read_cb</span> 已经在锁里 → 里面再调 <span class="kbd">lvgl_port_lock()</span> 会<strong>自死锁</strong>。所以用不带锁的内部函数。</td>
+      </tr>
+      <tr>
+        <td><strong>切服务必须成对</strong></td>
+        <td><span class="kbd">ws.set_service("text")</span>（决定 partial 往哪路由）+ <span class="kbd">asr.switch_service("text")</span>（通知服务器）。漏前者 → 识别文字被送去空槽位，<strong>静默丢失、不报错</strong>。</td>
+      </tr>
+    </table>
+    <div class="foot">
+      对应实现：<span class="kbd">main/drivers/button_edge.cpp</span> ·
+      <span class="kbd">main/display/lvgl_port.cpp</span> ·
+      <span class="kbd">main/drivers/ws.cpp</span> ·
+      <span class="kbd">main/drivers/rtasr.cpp</span> ·
+      <span class="kbd">main/business/ui_bridge.cpp</span>（阶段 2 新建）
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,7 +1,8 @@
-idf_component_register(SRC_DIRS "." "drivers" "display" "lvgl" "lvgl/components" "lvgl/screens" "lvgl/images" "lvgl/fonts"
+idf_component_register(SRC_DIRS "." "drivers" "display" "business" "lvgl" "lvgl/components" "lvgl/screens" "lvgl/images" "lvgl/fonts"
                     INCLUDE_DIRS "."
                                   "drivers"
                                   "display"
+                                  "business"
                                   "lvgl"
                     REQUIRES esp_wifi esp_event esp_netif nvs_flash esp_driver_gpio esp_driver_i2s esp_driver_spi esp_lcd mbedtls esp_timer esp_websocket_client cjson lvgl)
 
