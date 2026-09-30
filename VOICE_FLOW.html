@@ -191,13 +191,13 @@
       </div>
     </div>
 
-    <div class="hop"><span class="bar"></span><code>cmd_q</code> 队列<span class="bar"></span></div>
+    <div class="hop"><span class="bar"></span><code>voice_q</code> 队列<span class="bar"></span></div>
 
     <div class="step" style="--c:var(--voice)">
       <div class="ctx"><span>voice_task</span></div>
       <div class="rail"></div>
       <div class="card">
-        <span class="fn">xQueueReceive(cmd_q)</span> 被唤醒
+        <span class="fn">xQueueReceive(voice_q)</span> 被唤醒
         <div class="note">平时它<strong>睡在这条队列上</strong>（<code>portMAX_DELAY</code>），收不到命令就零 CPU 占用</div>
       </div>
     </div>
@@ -241,7 +241,7 @@
         <span class="fn">采音循环（每 40ms 一帧）</span>
         <ul>
           <li><code>mic.read_frame(pcm, 1280, 40ms)</code> ← 收音就在这个任务里</li>
-          <li>帧头 <strong>peek 一次</strong> <code>cmd_q</code>，看有没有 STOP</li>
+          <li>帧头 <strong>peek 一次</strong> <code>voice_q</code>，看有没有 STOP</li>
           <li><code>asr.send_audio(pcm, 1280)</code> → 二进制帧发出</li>
           <li>若 <code>!ws.is_connected()</code> → 中止会话</li>
         </ul>
@@ -264,7 +264,7 @@
       </div>
     </div>
 
-    <div class="hop"><span class="bar"></span><code>cmd_q</code> 队列<span class="bar"></span></div>
+    <div class="hop"><span class="bar"></span><code>voice_q</code> 队列<span class="bar"></span></div>
 
     <div class="step" style="--c:var(--voice)">
       <div class="ctx"><span>voice_task</span></div>

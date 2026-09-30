@@ -60,8 +60,8 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 |---|---|
 | 分支 | `CH_rebuild_logic` |
 | 最新提交 | `763f5a2 修复抖动_阶段1完成` |
-| 工作区 | 有未提交改动（阶段 1 收尾 + 阶段 0 + **阶段 2**，**待构建/烧录验证**） |
-| 阶段 | **阶段 0 + 阶段 1 + 阶段 2 代码已完成**；阶段 2 尚未上机验证 |
+| 工作区 | 有未提交改动（阶段 1 收尾 + 阶段 0 + **阶段 2**，**已构建通过 + 已上机验证**） |
+| 阶段 | **阶段 0 + 1 + 2 完成**；下一个是**阶段 3**（真采音闭环） |
 
 ### 各阶段成果
 
@@ -82,16 +82,20 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 - ✅ `ws.cpp::init()` 已钉核（注意还须设 `task_core_id_set`，见 §6）
 - ✅ `app_fsm.{hpp,cpp}`、`button.{hpp,cpp}` 已改名 `*.txt` 留档（不再参与编译）
 
-**阶段 2（骨架完成，未上机）** —— ws_keeper + UiBridge + voice：
+**阶段 2（已硬件验证）** —— ws_keeper + UiBridge + voice：
 
-- ✅ 三条队列（`cmd_q` / `resp_q` / `stream_q`）+ asr 回调接线 + UI 消费 timer
-- ✅ `ws_keeper_task`（连接生命周期）、`voice_task`（命令驱动，**假会话不采音**）
+- ✅ 三条队列（`voice_q` / `resp_q` / `stream_q`）+ asr 回调接线 + UI 消费 timer
+- ✅ `ws_keeper_task`（连接生命周期 + 状态上报）、`voice_task`（命令驱动，**假会话不采音**）
 - ✅ `main.cpp` 重写：WiFi + WS + 三任务 + 按键接线
-- ⬜ **待验证**：冷启动建连 + 切 text；按 IO10 看 start/end 发出无错
+- ✅ **实测通过**：冷启动建连 + 切 text；按 IO10 走完 `start → end`；
+  `ws_keeper → resp_q → lvgl 任务` 整条跨任务链路打通（日志 `[结果] kind=2 ... status=0`）
+- ✅ **队列内存实测 8932 字节**（`resp_msg_t` 524 × 16 + `stream_msg_t` 516 + `voice_cmd_msg_t` 8 × 4）
+  —— 这个数字是"消息结构没被改坏"的硬指标，改结构后要对照
 
 ### 👉 下一步
 
-**构建 + 烧录验证阶段 2**（验证清单见 §9），然后进**阶段 3**（真采音闭环）。
+进**阶段 3**（真采音闭环）：把 `voice_session` 的假会话换成真采音循环
+（骨架已写在 `voice.cpp` 注释里，含三个必须注意的边界），并接 `stream_q` 流式上屏。
 
 ---
 
@@ -102,7 +106,8 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 核心思路（一句话）：**业务从"状态机轮询"改为"事件/命令驱动"**，
 `RtAsr`/`Llm`/`WS` 协议层几乎不动（干净无状态），重写的是调度层（`AppFsm` 退役）。
 
-阶段划分：~~0 基础设施~~（**已补**）→ ~~1 输入事件化~~（**已硬件验证**）→ ~~2 ws_keeper+UiBridge~~（**骨架完成，待上机**）→ **3 语音采音闭环（下一个）** → 4 清理。
+阶段划分：~~0 基础设施~~（**已补**）→ ~~1 输入事件化~~（**已硬件验证**）→ ~~2 ws_keeper+UiBridge~~（**已硬件验证**）→ **3 语音采音闭环（下一个）** → 4 清理。
+
 
 ### 阶段 2 的任务/上下文地图（**这是读代码的入口**）
 
@@ -117,7 +122,7 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 数据流（**跨任务只走队列；发送是同步函数调用**）：
 
 ```
-按键(中断→esp_timer) --cmd_q--> voice_task --asr.start/send_audio/end--> 服务器
+按键(中断→esp_timer) --voice_q--> voice_task --asr.start/send_audio/end--> 服务器
 服务器 --> websocket_task(回调) --resp_q/stream_q--> lvgl 任务(UI timer) --> 屏幕
 ```
 
@@ -281,6 +286,18 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | `RtAsr::handle_partial/final/revise` 三者只差"取到 text 之后干什么" | 已抽成 `extract_text()` + 三个薄壳（`rtasr.cpp`）。**别把 `revise` 并进 `final`**：`revise` 故意不触发 `m_cb`，合并会让 UI 收到假的"说完了" |
 | `WS::dispatch_msg` 里 `partial` **不走查表**，因为 `type=="partial"` 被"语音"和"LLM"两个服务共用，一维 `type` 分不出来 | 见上一条 |
 
+### 消息载荷的约定（`bus_msg.hpp`）★ 改动前务必先读
+
+| 事实 | 含义 |
+|---|---|
+| `resp_msg_t` 的载荷是 **union**（`u.text[512]` / `u.i32` / `u.f32` / `u.sta`），**`kind` 决定读哪一项** | 消费端**必须**先看 `kind` 再取 `u` —— 拿状态类的消息去读 `u.text` 会打出乱码（`drain_queues` 里已按 kind 分支） |
+| **union 成员必须是"平凡类型"，且不得含指针** | 队列靠 `memcpy` 搬字节，只保护这 512 字节本身。成员里若放了 `char*`，等于把值拷贝退回成"指针 + 一块无人保护的内存"（悬空/被改写）。要放字符串就用**内联定长数组** |
+| union 大小 = **最大成员**（现为 `text[512]`）→ `resp_msg_t` 恒为 **524 字节** | 新增成员只要 ≤ 512，**队列内存不变**（实测总数 8932）。加了 8 字节对齐的类型（某些 ABI 下 `double`）会让结构体涨到 528 —— 加完请对照那行启动日志 |
+| **状态统一走 `status_kind_t`**（CONNECTED/DISCONNECTED/RECONNECTING/STARTED/ENDED/ABORTED） | 不管哪个服务，报给 LVGL 的状态都写进这个枚举；投递用 `post_resp_status(kind, status)`。**标签仍按服务分**（`RESP_ASR_STATUS` / `RESP_WS_STATUS`）以保留"谁报的" |
+| 三个投递接口最后都走 **`post_resp_msg()`** 入队 | 那是 `resp_q` 的**唯一入队点**：`timeout=0` 的硬要求和"满了告警"只写一份。加新载荷类型时，调用方自己填 `resp_msg_t` 再调 `post_resp_msg()` 即可，**不用改 UiBridge** |
+| `voice_cmd_msg_t.arg` 是**标量参数槽位**（4 字节），当前**全部传 0、没人读** | 装不下文本；**更不要拿它塞指针**（32 位机上 `int32_t` 和指针同宽，编译通过但会引入悬空） |
+| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 重连循环约 1 轮/秒，`resp_q` 深度只有 16 —— 无脑投递十几秒就满，开始丢消息（含 `RESP_ASR_FINAL`）。故只在**状态变化**时投一条；`DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 |
+
 ### 已确认可用的重载/配置
 
 - `ui_chat` 屏**已有现成对话控件**：`ui_metext`（我说的，绿气泡）/ `ui_restext`（回复，深色气泡）——微信式布局已画好，等接数据。
@@ -333,17 +350,20 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
   `lcd_display.hpp` 过时引脚注释与无用的 `ENC_A_PIN` 宏已清理；
   `lvgl_port_send_encoder_dir()` 与 `encoder_dir_t` 死代码已删除。
   **输入链路若再出问题，诊断需重新添加**（照 §5.2 末尾的"教训"写）。
-- 📌 **阶段 0 / 2 已完成，待上机验证**。验证清单（烧录后按此看串口）：
+- 📌 **阶段 0 / 1 / 2 已完成并上机验证**（构建通过；建连+切 text；IO10 走完 start→end；
+  跨任务队列链路打通）。回归验证清单（下次改动后照此看串口）：
   1. 构建过；串口**无** `handler 表已满`（实测只需 3 个 handler 位，表深 4）
-  2. `ui_bridge: 就绪: cmd_q=4 resp_q=16 stream_q=1`
-  3. `ws_keeper: 网关已连接, 已切到 text 服务`（服务器应回 `svc_ok`）
-  4. **阶段 1 无回归**：转编码器仍切屏、按键仍一次一沿、**无 Task WDT**
-  5. 按 IO10 → `voice: 已发送 start` → 1s 后 `已发送 end`（假会话，不采音）
-  6. 按 IO8 → `voice: 收到 CMD_SVC_SWITCH (IO8) —— 本阶段只留钩子`
-  7. `ui_bridge: [结果] kind=...`（若服务器返回 final）
-  8. 拔网线 → `ws_keeper: 连接已失效, 1.0s 后重连` → 恢复
+  2. `ui_bridge: 就绪: voice_q=4 resp_q=16 stream_q=1 (共约 8932 字节内部 SRAM)`
+     ← **8932 这个数是"消息结构没被改坏"的硬指标**，改 `resp_msg_t`/union 后必须对照
+  3. `ui_bridge: [结果] kind=2 ... status=0`（`RESP_WS_STATUS` + `CONNECTED`）
+  4. `ws_keeper: 网关已连接, 已切到 text 服务`（服务器回 `svc_ok`）
+  5. **阶段 1 无回归**：转编码器仍切屏、按键仍一次一沿、**无 Task WDT**
+  6. 按 IO10 → `status=3`(STARTED) → `voice: 已发送 start` → 1s 后 `已发送 end` → `status=4`(ENDED)
+  7. 按 IO8 → **只有** `[按键] 服务键 按下 (IO8 未接业务)`，**不投任何队列**
+  8. 拔网线 → `status=1`(DISCONNECTED) → `status=2`(RECONNECTING) → 插回 → `status=0`(CONNECTED)
 - 📌 **阶段 3 待做**：`voice_session` 的假会话换成真采音循环（骨架已写在 `voice.cpp` 注释里，
   含三个必须注意的边界：读失败不能发包 / STOP 检查别被 `continue` 跳过 / 发送阻塞会吃 128ms DMA 余量）。
+  同时把 `drain_queues()` 里的 log 换成真正的 `switch (r.kind)` 上屏（那个 if/else 就是雏形）。
 - 📌 **阶段 4 待做（清理）**：`rtasr.cpp` 里 `printf` 在 WS 回调(持 `client->lock`)里跑，
   网络抖动时可能拖住发音频 → 降级为 `ESP_LOGD`；`queue` 是否改 `xQueueCreateStatic` + PSRAM。
 - 📌 **已知行为（未改，用户明确要求先不动）**：`lv_indev_read()` 在屏幕动画期间

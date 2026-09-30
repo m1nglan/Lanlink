@@ -22,16 +22,16 @@ UiBridge& UiBridge::get(void)
 
 esp_err_t UiBridge::init(void)
 {
-    if (m_cmd_q != nullptr) {
+    if (m_voice_q != nullptr) {
         return ESP_ERR_INVALID_STATE;   /* 重复 init */
     }
 
-    m_cmd_q    = xQueueCreate(CMD_Q_LEN,    sizeof(cmd_msg_t));
+    m_voice_q  = xQueueCreate(VOICE_Q_LEN,  sizeof(voice_cmd_msg_t));
     m_resp_q   = xQueueCreate(RESP_Q_LEN,   sizeof(resp_msg_t));
     m_stream_q = xQueueCreate(STREAM_Q_LEN, sizeof(stream_msg_t));
-    if (m_cmd_q == nullptr || m_resp_q == nullptr || m_stream_q == nullptr) {
-        ESP_LOGE(TAG, "队列创建失败 (cmd=%p resp=%p stream=%p)",
-                 m_cmd_q, m_resp_q, m_stream_q);
+    if (m_voice_q == nullptr || m_resp_q == nullptr || m_stream_q == nullptr) {
+        ESP_LOGE(TAG, "队列创建失败 (voice=%p resp=%p stream=%p)",
+                 m_voice_q, m_resp_q, m_stream_q);
         return ESP_ERR_NO_MEM;
     }
 
@@ -42,9 +42,9 @@ esp_err_t UiBridge::init(void)
     m_asr.attach(WS::get());
     m_asr.set_result_callback(&UiBridge::on_asr_result, this);
 
-    ESP_LOGI(TAG, "就绪: cmd_q=%d resp_q=%d stream_q=%d (共约 %u 字节内部 SRAM)",
-             CMD_Q_LEN, RESP_Q_LEN, STREAM_Q_LEN,
-             (unsigned)(CMD_Q_LEN * sizeof(cmd_msg_t)
+    ESP_LOGI(TAG, "就绪: voice_q=%d resp_q=%d stream_q=%d (共约 %u 字节内部 SRAM)",
+             VOICE_Q_LEN, RESP_Q_LEN, STREAM_Q_LEN,
+             (unsigned)(VOICE_Q_LEN * sizeof(voice_cmd_msg_t)
                         + RESP_Q_LEN * sizeof(resp_msg_t)
                         + STREAM_Q_LEN * sizeof(stream_msg_t)));
     return ESP_OK;
@@ -52,58 +52,72 @@ esp_err_t UiBridge::init(void)
 
 /* ======================= 投递 (全部非阻塞) ======================= */
 
-bool UiBridge::push_cmd(cmd_t cmd, int32_t arg)
+bool UiBridge::push_voice_cmd(voice_cmd_t cmd, int32_t arg) 
 {
-    if (m_cmd_q == nullptr) {
+    if (m_voice_q == nullptr) {
         return false;
     }
-    cmd_msg_t m = {};
+    voice_cmd_msg_t m = {};
     m.cmd = cmd;
     m.arg = arg;
-    return xQueueSend(m_cmd_q, &m, 0) == pdTRUE;   /* timeout=0: 绝不阻塞 */
+    return xQueueSend(m_voice_q, &m, 0) == pdTRUE;   /* timeout=0: 绝不阻塞 */
 }
 
 bool UiBridge::voice_start(void)
 {
-    bool ok = push_cmd(CMD_VOICE_START, 0);
+    bool ok = push_voice_cmd(CMD_VOICE_START, 0);
     if (!ok) {
-        ESP_LOGW(TAG, "cmd_q 满, CMD_VOICE_START 丢弃");
+        ESP_LOGW(TAG, "voice_q 满, CMD_VOICE_START 丢弃");
     }
     return ok;
 }
 
 bool UiBridge::voice_stop(void)
 {
-    bool ok = push_cmd(CMD_VOICE_STOP, 0);
+    bool ok = push_voice_cmd(CMD_VOICE_STOP, 0);
     if (!ok) {
-        ESP_LOGW(TAG, "cmd_q 满, CMD_VOICE_STOP 丢弃");
+        ESP_LOGW(TAG, "voice_q 满, CMD_VOICE_STOP 丢弃");
     }
     return ok;
 }
 
-bool UiBridge::svc_switch_pending(void)
-{
-    return push_cmd(CMD_SVC_SWITCH, 0);   /* 本阶段无人消费, 只占位 */
-}
-
-void UiBridge::post_resp(resp_kind_t kind, const char *text)
+/* ============ resp_q 的**唯一入队点** ============
+ * 下面三个投递接口 (post_resp / post_resp_status / 调用方直接用) 最后都走这里,
+ * 所以"非阻塞发送"和"满了告警"只写一份。
+ * 传 const 引用 → 只有 xQueueSend 内部那一次拷贝, 不额外吃栈。 */
+void UiBridge::post_resp_msg(const resp_msg_t &m)
 {
     if (m_resp_q == nullptr) {
         return;
     }
+    /* ★ timeout=0 是硬要求: 本函数会在 WS 回调里被调用,
+     *   那时正持着 esp_websocket_client 的 client->lock。
+     *   若这里阻塞, 整个 WS 收发(含 voice_task 发音频)都会被拖死。 */
+    if (xQueueSend(m_resp_q, &m, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "resp_q 满, 丢弃 kind=%d", (int)m.kind);
+    }
+}
+
+/* 文本类: 标签 + 字符串 (ASR final / 通用提示) */
+void UiBridge::post_resp(resp_kind_t kind, const char *text)
+{
     resp_msg_t m = {};
     m.kind = kind;
     m.t_ms = (uint32_t)(esp_timer_get_time() / 1000);
     if (text != nullptr) {
-        strlcpy(m.text, text, sizeof(m.text));   /* ★ 绝不用 strcpy: 防截断越界 */
+        strlcpy(m.u.text, text, sizeof(m.u.text));   /* ★ 绝不用 strcpy: 防截断越界 */
     }
+    post_resp_msg(m);
+}
 
-    /* ★ timeout=0 是硬要求: 本函数可能在 WS 回调里被调用,
-     *   那时正持着 esp_websocket_client 的 client->lock。
-     *   若这里阻塞, 整个 WS 收发(含 voice_task 发音频)都会被拖死。 */
-    if (xQueueSend(m_resp_q, &m, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "resp_q 满, 丢弃 kind=%d", (int)kind);
-    }
+/* 状态类: 标签 + status_kind_t (与 post_resp 同形, 只是载荷是枚举而不是文本) */
+void UiBridge::post_resp_status(resp_kind_t kind, status_kind_t status)
+{
+    resp_msg_t m = {};
+    m.kind  = kind;
+    m.t_ms  = (uint32_t)(esp_timer_get_time() / 1000);
+    m.u.sta = status;
+    post_resp_msg(m);
 }
 
 void UiBridge::post_stream(stream_kind_t kind, const char *text)
@@ -111,7 +125,7 @@ void UiBridge::post_stream(stream_kind_t kind, const char *text)
     if (m_stream_q == nullptr) {
         return;
     }
-    stream_msg_t m = {};
+    stream_msg_t m = {};  //< 类型+文字结构体
     m.kind = kind;
     if (text != nullptr) {
         strlcpy(m.text, text, sizeof(m.text));
@@ -154,10 +168,18 @@ void UiBridge::drain_queues(void)
          *   所以必须靠"队列非空才刷"来避免无谓开销 —— 不要自己加轮询。 */
     }
 
-    /* ---- 控制通道: 可靠队列, 逐条处理 ---- */
+    /* ---- 控制通道: 可靠队列, 逐条处理 ----
+     * 本阶段只 log; 阶段 3 换成 switch (r.kind) 分派到具体控件。
+     * ★ r.kind 决定读 u 的哪一项 —— 状态类是 u.sta, 其余是 u.text,
+     *   不能一律按 text 打 (状态类的 u.text 是枚举字节, 会打成乱码)。 */
     while (xQueueReceive(m_resp_q, &r, 0) == pdTRUE) {
-        ESP_LOGI(TAG, "[结果] kind=%d t=%ums text=\"%s\"",
-                 (int)r.kind, (unsigned)r.t_ms, r.text);
+        if (r.kind == RESP_ASR_STATUS || r.kind == RESP_WS_STATUS) {
+            ESP_LOGI(TAG, "[结果] kind=%d t=%ums status=%d",
+                     (int)r.kind, (unsigned)r.t_ms, (int)r.u.sta);
+        } else {
+            ESP_LOGI(TAG, "[结果] kind=%d t=%ums text=\"%s\"",
+                     (int)r.kind, (unsigned)r.t_ms, r.u.text);
+        }
     }
 }
 

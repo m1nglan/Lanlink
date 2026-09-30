@@ -12,7 +12,7 @@
  * 不干的事 (都搬走了):
  *   ✗ 发 start / 音频 / end   → voice_task
  *   ✗ LLM 转发阶段机          → 本阶段不做 (见 llm_chain.hpp)
- *   ✗ IO8 服务切换            → 只投 CMD_SVC_SWITCH, 无人处理
+ *   ✗ IO8 服务切换            → 按键只打日志 (main.cpp), 不投队列
  *
  * ⚠️ 组件配置里 disable_auto_reconnect / disable_pingpong_discon 都是 true,
  *    也就是说**重连和保活必须由本任务负责**, 别指望 esp_websocket_client。

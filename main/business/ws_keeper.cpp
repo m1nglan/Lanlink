@@ -27,30 +27,48 @@ static inline uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+/* 上报 WS 状态给 UI。
+ * ★ 去抖: 只在状态【变化】时投一条 —— 否则重连循环里每轮都投,
+ *   resp_q 深度只有 16, 一秒一条很快就会满并开始丢消息。 */
+static void report_ws_status(status_kind_t sta)
+{
+    static bool          inited = false;
+    static status_kind_t last   = CONNECTED;   /* 初值随便, 由 inited 兜住 */
+
+    if (inited && sta == last) {
+        return;
+    }
+    inited = true;
+    last   = sta;
+    UiBridge::get().post_resp_status(RESP_WS_STATUS, sta);
+}
+
 static void ws_keeper_task(void *arg)
 {
     (void)arg;
     WS    &ws  = WS::get();
     RtAsr &asr = UiBridge::get().asr();
 
-    uint32_t last_ping_ms   = 0;
-    bool     first_attempt  = true;
+    uint32_t last_ping_ms  = 0;
+    bool     was_connected = false;   /* 用于区分"断线"和"开机就没连上" */
 
     while (1) {
         /* ============ 断线 / 死连接 → 重建 ============ */
         if (!ws.is_connected() || ws.is_stale()) {
-            ws.deinit();                 /* m_ws==NULL 时是安全的空操作 */
-            last_ping_ms = 0;
-
-            if (!first_attempt) {
-                /* 首轮不打扰: 开机本来就没连上, 不算"重连" */
-                UiBridge::get().post_resp(RESP_WS_STATUS, "重连中...");
+            /* 只有"连上过又断了"才算 DISCONNECTED;
+             * 开机就没连上不报, 免得 UI 一上来就显示"断线" */
+            if (was_connected) {
+                report_ws_status(DISCONNECTED);
+                was_connected = false;
                 ESP_LOGW(TAG, "连接已失效, %.1fs 后重连", WS_KEEPER_RETRY_MS / 1000.0f);
                 vTaskDelay(pdMS_TO_TICKS(WS_KEEPER_RETRY_MS));
             }
-            first_attempt = false;
+
+            ws.deinit();                 /* m_ws==NULL 时是安全的空操作 */
+            last_ping_ms = 0;
 
             if (ws.init() != ESP_OK) {
+                report_ws_status(RECONNECTING);   /* 去抖后只报一次 */
                 ESP_LOGW(TAG, "建连失败, %.1fs 后重试", WS_KEEPER_RETRY_MS / 1000.0f);
                 vTaskDelay(pdMS_TO_TICKS(WS_KEEPER_RETRY_MS));
                 continue;
@@ -66,8 +84,9 @@ static void ws_keeper_task(void *arg)
             ws.set_service("text");
             asr.switch_service("text", WS_SEND_TIMEOUT_MS);
 
-            last_ping_ms = now_ms();
-            UiBridge::get().post_resp(RESP_WS_STATUS, "已连接 (服务=text)");
+            last_ping_ms  = now_ms();
+            was_connected = true;
+            report_ws_status(CONNECTED);
             ESP_LOGI(TAG, "网关已连接, 已切到 text 服务");
             continue;   /* 立刻回去跑保活逻辑 */
         }
