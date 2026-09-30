@@ -33,20 +33,20 @@ static inline uint32_t now_ms(void)
  * ================================================================ */
 static void voice_session(UiBridge &ub)
 {
-    WS       &ws    = WS::get();
-    RtAsr    &asr   = ub.asr();
-    QueueHandle_t cmd_q = ub.cmd_queue();
-    cmd_msg_t m;
+    WS             &ws      = WS::get();
+    RtAsr          &asr     = ub.asr();
+    QueueHandle_t   voice_q = ub.voice_queue();
+    voice_cmd_msg_t m;
 
     ESP_LOGI(TAG, "=== 会话开始 (阶段2 假会话: 不采音) ===");
-    ub.post_resp(RESP_ASR_STATUS, "会话开始");
+    ub.post_resp_status(RESP_ASR_STATUS, STARTED);
 
     /* ① 等连接就绪 (连接生命周期归 ws_keeper, 这里只等) */
     uint32_t t0 = now_ms();
     while (!ws.is_connected()) {
         if (now_ms() - t0 > VOICE_WAIT_CONN_MS) {
             ESP_LOGW(TAG, "等连接超时, 会话中止");
-            ub.post_resp(RESP_ASR_STATUS, "中止: 等连接超时");
+            ub.post_resp_status(RESP_ASR_STATUS, ABORTED);
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -65,7 +65,8 @@ static void voice_session(UiBridge &ub)
     /* ③ 开始一轮识别 */
     if (asr.start(WS_SEND_TIMEOUT_MS) != ESP_OK) {
         ESP_LOGE(TAG, "start 发送失败, 会话中止");
-        ub.post_resp(RESP_ASR_STATUS, "中止: start 发送失败");
+        ub.post_resp_status(RESP_ASR_STATUS, ABORTED);
+
         return;
     }
     ESP_LOGI(TAG, "已发送 start");
@@ -77,7 +78,7 @@ static void voice_session(UiBridge &ub)
      *      while (1) {
      *          esp_err_t r = mic.read_frame(pcm, sizeof(pcm), 40);   // 阻塞等一帧
      *          // ★ 不管读没读到都先看 STOP/断线, 否则麦克风故障时会永远结束不了
-     *          if (xQueueReceive(cmd_q, &m, 0) == pdTRUE && m.cmd == CMD_VOICE_STOP) break;
+     *          if (xQueueReceive(voice_q, &m, 0) == pdTRUE && m.cmd == CMD_VOICE_STOP) break;
      *          if (!ws.is_connected()) { abort = true; break; }
      *          if (r != ESP_OK) continue;   // ← 读失败时 pcm 还是上一帧旧数据, 绝不能发
      *          if (asr.send_audio((uint8_t *)pcm, sizeof(pcm), WS_SEND_TIMEOUT_MS) != ESP_OK) {
@@ -88,7 +89,7 @@ static void voice_session(UiBridge &ub)
     bool got_stop = false;
     uint32_t t1 = now_ms();
     while (now_ms() - t1 < VOICE_FAKE_HOLD_MS) {
-        if (xQueueReceive(cmd_q, &m, 0) == pdTRUE && m.cmd == CMD_VOICE_STOP) {
+        if (xQueueReceive(voice_q, &m, 0) == pdTRUE && m.cmd == CMD_VOICE_STOP) {
             got_stop = true;
             break;
         }
@@ -100,7 +101,7 @@ static void voice_session(UiBridge &ub)
     asr.end(WS_SEND_TIMEOUT_MS);
     ESP_LOGI(TAG, "已发送 end");
 
-    ub.post_resp(RESP_ASR_STATUS, "会话结束, 等服务器 final");
+    ub.post_resp_status(RESP_ASR_STATUS, ENDED);
     /* 注意: 这里**不等 final** —— final 由 websocket_task 收到后经 asr 回调
      *       投进 resp_q, 由 UI 侧消费。本任务直接回队列睡觉。 */
 }
@@ -111,17 +112,17 @@ static void voice_session(UiBridge &ub)
 static void voice_task(void *arg)
 {
     (void)arg;
-    UiBridge     &ub    = UiBridge::get();
-    QueueHandle_t cmd_q = ub.cmd_queue();
-    cmd_msg_t m;
+    UiBridge        &ub      = UiBridge::get();
+    QueueHandle_t    voice_q = ub.voice_queue();
+    voice_cmd_msg_t  m;
 
     while (1) {
         /* ★ 空闲时睡在这里, 零 CPU 占用。由 xQueueSend 唤醒, 不是轮询。 */
-        if (xQueueReceive(cmd_q, &m, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(voice_q, &m, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
-        switch (m.cmd) {
+        switch (m.cmd) {  //< voice_q队列
         case CMD_VOICE_START:
             voice_session(ub);
             break;
@@ -131,10 +132,6 @@ static void voice_task(void *arg)
             ESP_LOGI(TAG, "空闲状态收到 CMD_VOICE_STOP, 忽略");
             break;
 
-        case CMD_SVC_SWITCH:
-            /* IO8 钩子: 本阶段只留接口, 不真切服务 */
-            ESP_LOGI(TAG, "收到 CMD_SVC_SWITCH (IO8) —— 本阶段只留钩子, 未接业务");
-            break;
 
         default:
             ESP_LOGW(TAG, "未知命令 cmd=%d", (int)m.cmd);

@@ -21,12 +21,12 @@ Lanlink（ESP32-S3, IDF v6.0.2, LVGL 9.5）当前所有业务逻辑缠在 `AppFs
 
 | 项 | 结论 |
 |---|---|
-| voice_task | 常驻、阻塞在 cmd_q；START→采音循环，STOP→发 end→回队列睡。**异步式，无信号量** |
+| voice_task | 常驻、阻塞在 voice_q；START→采音循环，STOP→发 end→回队列睡。**异步式，无信号量** |
 | final 处理 | websocket_task（组件任务）回调自动收 → 投 resp_q → UI 拉。**voice_task 不等 final** |
-| 触发源 | UI 中心化：按钮/编码器的事件回调（LVGL 上下文）调 `voice_start()` 投 cmd_q |
+| 触发源 | UI 中心化：按钮/编码器的事件回调（LVGL 上下文）调 `voice_start()` 投 voice_q |
 | 结果回 UI | **双通道**：resp_q（可靠）+ stream_q（流式覆盖），见下 |
 | 编码器 | 保留 ISR+解码；消费端改 LVGL indev read_cb（消灭独立 encoder_task 与跨任务锁） |
-| 按键 | GPIO 中断 + esp_timer(~15ms) 消抖 → 按下/释放双沿回调 → 投 cmd_q |
+| 按键 | GPIO 中断 + esp_timer(~15ms) 消抖 → 按下/释放双沿回调 → 投 voice_q |
 | app_fsm | 删除，LLM 枚举/常量迁 `business/llm_chain.hpp` 声明式预留 |
 | 聊天历史 | **环形 20 条**；超限 `lv_obj_del` 最老 panel → 文字内存自动回收 |
 
@@ -55,20 +55,24 @@ stream_q (深度1 覆盖队列)      ← 流式: ASR partial 增量文本
 
 ```cpp
 typedef enum { CMD_NONE=0, CMD_VOICE_START, CMD_VOICE_STOP,
-               CMD_SVC_SWITCH,          // 未来 IO8
                CMD_LLM_CHAT_TEXT,       // 未来
-} cmd_t;
-typedef struct { cmd_t cmd; int32_t arg; } cmd_msg_t;      // 8B
+} voice_cmd_t;
+typedef struct { voice_cmd_t cmd; int32_t arg; } voice_cmd_msg_t;   // 8B (arg=标量参数, 当前全 0)
 
 typedef enum { STREAM_ASR_PARTIAL=0, STREAM_LLM_PARTIAL } stream_kind_t;
 typedef struct { stream_kind_t kind; char text[512]; } stream_msg_t;
 
 typedef enum { RESP_ASR_FINAL=0, RESP_ASR_STATUS, RESP_WS_STATUS,
                RESP_LLM_FINAL, RESP_STATUS } resp_kind_t;
+// 统一的状态值: 不管哪个服务, 报给 LVGL 的状态都写这里
+typedef enum { CONNECTED=0, DISCONNECTED, RECONNECTING,
+               STARTED, ENDED, ABORTED } status_kind_t;
 typedef struct { resp_kind_t kind; uint32_t flags; uint32_t t_ms;
-                 char text[512]; } resp_msg_t;             // 约520B
+                 union { char text[512]; int32_t i32; float f32;
+                         status_kind_t sta; } u;
+               } resp_msg_t;                              // 524B (union 取最大成员)
 
-#define CMD_Q_LEN 4
+#define VOICE_Q_LEN 4
 #define RESP_Q_LEN 16
 ```
 尺寸说明：`text[512]` 按"一句话"容量；final 超长会被 `strlcpy` 截断（可接受）。
@@ -97,7 +101,7 @@ typedef struct { resp_kind_t kind; uint32_t flags; uint32_t t_ms;
 | 文件 | 职责 |
 |---|---|
 | `bus_msg.hpp` | 队列/消息类型（上节） |
-| `ui_bridge.hpp/.cpp` | 单例：建 cmd_q/resp_q/stream_q；`init()` 绑 asr 回调投队列；`voice_start()/voice_stop()`；`start_ui_timer()` 注册 lv_timer 消费队列（本次 log）；`report_status()` |
+| `ui_bridge.hpp/.cpp` | 单例：建 voice_q/resp_q/stream_q；`init()` 绑 asr 回调投队列；`voice_start()/voice_stop()`；`start_ui_timer()` 注册 lv_timer 消费队列（本次 log）；`report_status()` |
 | `voice.hpp/.cpp` | `voice_task`（CPU0 prio6 栈6K）+ 语音会话逻辑 |
 | `ws_keeper.hpp/.cpp` | `ws_keeper_task`（CPU0 prio5 栈8K）：保活+重连+attach+切text |
 | `llm_chain.hpp` | 仅 `enum llm_stage_t` + 超时常量 + 接线注释（不编译逻辑） |
@@ -129,8 +133,8 @@ static void voice_task(void*) {
     I2sMic mic; ESP_ERROR_CHECK(mic.init());   // 仅建通道
     bool recording = false;
     while (1) {
-        cmd_msg_t m;
-        if (xQueueReceive(s_cmd_q, &m, portMAX_DELAY) != pdTRUE) continue;
+        voice_cmd_msg_t m;
+        if (xQueueReceive(s_voice_q, &m, portMAX_DELAY) != pdTRUE) continue;
         if (m.cmd==CMD_VOICE_START && !recording) recording = voice_session(mic);
     }
 }
@@ -139,12 +143,12 @@ static bool voice_session(I2sMic &mic) {
     static int16_t pcm[I2S_MIC_FRAME_BYTES/2];
     while (1) {
         if (mic.read_frame(pcm,sizeof(pcm),40)==ESP_ERR_TIMEOUT) continue;
-        if (xQueueReceive(s_cmd_q,&m,0)==pdTRUE && m.cmd==CMD_VOICE_STOP) break;  // 帧尾peek
+        if (xQueueReceive(s_voice_q,&m,0)==pdTRUE && m.cmd==CMD_VOICE_STOP) break;  // 帧尾peek
         if (!ws.is_connected()) { report(VOICE_ABORTED); mic.stop(); asr.end(100); return false; }
         if (asr.send_audio((uint8_t*)pcm,sizeof(pcm),WS_SEND_TIMEOUT_MS)!=ESP_OK){ /*abort*/ }
     }
     asr.end(...); mic.stop(); report(VOICE_STOPPED);
-    return true;   // 回 cmd_q 睡, 不等 final
+    return true;   // 回 voice_q 睡, 不等 final
 }
 ```
 STOP 最坏延迟 = 帧边界 40ms + 消抖 15ms ≈ <60ms（协议固有，勿切开音频帧）。
@@ -152,7 +156,7 @@ STOP 最坏延迟 = 帧边界 40ms + 消抖 15ms ≈ <60ms（协议固有，勿�
 ## 按键（button_edge）要点
 
 - ANYEDGE 中断 ISR **只做 `esp_timer_restart(tmr, 15000)`**（IRAM 安全）；15ms 无新中断后 timer 回调（esp_timer 任务上下文）读稳定电平，与上次比较，变了触发对应沿。
-- 回调在普通任务上下文 → 投 cmd_q 安全（8B 非阻塞）。
+- 回调在普通任务上下文 → 投 voice_q 安全（8B 非阻塞）。
 - IO10 按下→`CMD_VOICE_START`，释放→`CMD_VOICE_STOP`；IO8 只留钩子 log。
 
 ## 聊天历史与上屏（后续阶段，本次留接口）

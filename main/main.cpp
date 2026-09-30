@@ -28,11 +28,11 @@ static const char *TAG = "Main";
  *   ── 另有组件自带的 websocket_task (CPU0 prio5, 在 ws.cpp::init 里钉核)
  *
  * 输入 (无任务):
- *   按键   → GPIO 中断 + esp_timer 消抖 → 回调里投 cmd_q
+ *   按键   → GPIO 中断 + esp_timer 消抖 → 回调里投 voice_q
  *   编码器 → GPIO 中断 + 累加器 → LVGL indev 在自己的 timer 里消费
  *
  * 数据流 (跨任务全部走队列; 发送则是同步函数调用):
- *   按键 → cmd_q → voice_task → asr.start/send_audio/end ──> 服务器
+ *   按键 → voice_q → voice_task → asr.start/send_audio/end ──> 服务器
  *   服务器 ──> websocket_task(回调) → resp_q/stream_q → lvgl 任务上屏
  * ================================================================ */
 
@@ -60,10 +60,8 @@ static void on_button_edge(void *ctx, gpio_num_t pin, bool pressed)
             UiBridge::get().voice_stop();
         }
     } else if (pin == BTN_SVC_PIN) {
-        ESP_LOGI(TAG, "[按键] 服务键 %s (IO8 本阶段只留钩子)", pressed ? "按下" : "松开");
-        if (pressed) {
-            UiBridge::get().svc_switch_pending();
-        }
+        /* IO8: 本阶段只打日志、不投任何队列 (服务切换业务未定) */
+        ESP_LOGI(TAG, "[按键] 服务键 %s (IO8 未接业务)", pressed ? "按下" : "松开");
     }
 }
 

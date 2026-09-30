@@ -13,7 +13,7 @@
  * 分工:
  *   - 队列的**生产者**: 按键回调(esp_timer 任务) / WS 回调(websocket_task)
  *                     / voice_task / ws_keeper
- *   - 队列的**消费者**: voice_task(取 cmd_q) / lvgl 任务(取 resp_q, stream_q)
+ *   - 队列的**消费者**: voice_task(取 voice_q) / lvgl 任务(取 resp_q, stream_q)
  *
  * 本类**不建连、不建任务**:
  *   连接生命周期归 ws_keeper_task, 采音归 voice_task。
@@ -25,7 +25,7 @@
 
 class UiBridge {
 public:
-    static UiBridge& get(void);
+    static UiBridge& get(void);  //< 返回全程序唯一Uibridge
 
     /*! 建三队列 + 把 asr 绑到 WS 单例 + 注册结果回调。
      *  只做"登记", 与是否已建连无关 → 全程调用一次即可。 */
@@ -41,16 +41,25 @@ public:
     bool voice_start(void);
     /*! 请求结束本轮 (松开 IO10) */
     bool voice_stop(void);
-    /*! IO8: 服务切换挂起 (本阶段只投队列, 无人处理) */
-    bool svc_switch_pending(void);
 
     /*! 给 voice_task 用: 拿命令队列句柄, 自己阻塞等 */
-    QueueHandle_t cmd_queue(void) const { return m_cmd_q; }
+    QueueHandle_t voice_queue(void) const { return m_voice_q; }
 
     /* ---------------- 生产者接口 (voice_task / ws_keeper 投结果) ---------------- */
 
     /*! 投一条可靠消息 (满了丢弃并告警)。可在 WS 回调里调用。 */
     void post_resp(resp_kind_t kind, const char *text);
+
+    /*! 投一条**状态**消息: kind 标注是哪类状态 (决定种类), status 用统一的
+     *  status_kind_t —— 不管哪个服务, 要报给 LVGL 的状态都往这里塞。
+     *  可在任意上下文调用 (非阻塞)。 */
+    void post_resp_status(resp_kind_t kind, status_kind_t status);
+
+    /*! 投一条**已填好**的控制消息: kind / t_ms / u 都由调用方设好。
+     *  传 const 引用 → 只发生一次拷贝(xQueueSend 内部那次), 不额外吃栈。
+     *  加新载荷类型时用这个, 不必再往 UiBridge 里加方法。 */
+    void post_resp_msg(const resp_msg_t &m);
+
     /*! 投一条流式消息 (覆盖式, 永不失败)。可在 WS 回调里调用。 */
     void post_stream(stream_kind_t kind, const char *text);
 
@@ -75,9 +84,9 @@ private:
     /*! WS 回调 (跑在 websocket_task, 且持着 client->lock) → 投队列 */
     static void on_asr_result(const char *text, bool is_final, void *ctx);
 
-    bool push_cmd(cmd_t cmd, int32_t arg);
+    bool push_voice_cmd(voice_cmd_t cmd, int32_t arg); 
 
-    QueueHandle_t m_cmd_q    = nullptr;
+    QueueHandle_t m_voice_q    = nullptr;
     QueueHandle_t m_resp_q   = nullptr;
     QueueHandle_t m_stream_q = nullptr;
 
