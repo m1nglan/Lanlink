@@ -47,3 +47,13 @@ typedef void (*btn_edge_cb_t)(void *ctx, gpio_num_t pin, bool pressed);
  * @return ESP_OK 成功
  */
 esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, void *ctx);
+
+/*!
+ * 累计进入 GPIO 边沿 ISR 的次数 (诊断用)。
+ *
+ * ★ 用途: 判断"按键线是不是在噪声里反复翻转"。正常按一次 = 几次~几十次;
+ *   若是几百/几千地涨 → 引脚接触不良/悬空 (面包板上很常见), 会引发
+ *   ISR 风暴 → 中断看门狗 panic。
+ *   在 voice.cpp 的每秒 level 日志里会打一次, 便于观察速率。
+ */
+uint32_t button_edge_isr_count(void);

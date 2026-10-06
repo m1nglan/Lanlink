@@ -26,9 +26,9 @@
 
 /* ------------------ 硬件接线参数（按实际连线修改） ------------------ */
 #define I2S_MIC_PORT_NUM            (I2S_NUM_0)  /*!< I2S 控制器编号 */
-#define I2S_MIC_BCLK_PIN            (GPIO_NUM_11) /*!< INMP441 SCK  -> ESP32 BCLK */
-#define I2S_MIC_WS_PIN              (GPIO_NUM_12) /*!< INMP441 WS   -> ESP32 WS(LRCK) */
-#define I2S_MIC_DIN_PIN             (GPIO_NUM_13) /*!< INMP441 SD   -> ESP32 DIN */
+#define I2S_MIC_BCLK_PIN            (GPIO_NUM_21) /*!< INMP441 SCK  -> ESP32 BCLK */
+#define I2S_MIC_WS_PIN              (GPIO_NUM_47) /*!< INMP441 WS   -> ESP32 WS(LRCK) */
+#define I2S_MIC_DIN_PIN             (GPIO_NUM_1) /*!< INMP441 SD   -> ESP32 DIN */
 #define I2S_MIC_DMA_BUF_COUNT       (8)          /*!< DMA 描述符数量 */
 #define I2S_MIC_DMA_FRAME_NUM       (256)        /*!< 每个 DMA buffer 的帧数(32bit 槽) */
 
@@ -54,6 +54,11 @@ public:
      * @return ESP_OK 成功；ESP_ERR_TIMEOUT 数据不足一帧；ESP_ERR_INVALID_* 参数/状态错误
      */
     esp_err_t read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms);
+
+    /*! 一帧的平均绝对幅度 (0 ~ 32767) —— 判"这一帧有没有声音"。纯计算, 不碰硬件。
+     *  用于区分"用户没说话"和"服务器不响应" (两者的现象都是收不到识别结果)。
+     *  @param samples int16 采样点个数 (不是字节数) */
+    static int frame_level(const int16_t *pcm, size_t samples);
 
     bool is_running(void) const { return m_running; }
 

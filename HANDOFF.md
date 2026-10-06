@@ -114,7 +114,7 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | 任务 | 核 | prio | 栈 | 职责 |
 |---|---|---|---|---|
 | `lvgl` | 1 | 2 | 6K | 渲染 + 编码器 indev + **UI 队列消费 timer(50ms)** |
-| `ws_keeper` | 0 | 5 | 8K | WS 连接生命周期：建连 / 重连 / ping 保活 / 切 text |
+| `ws_keeper` | 0 | 5 | 8K | WS 连接生命周期：建连 / 重连 / ping 保活。**不切服务**（归 voice_task） |
 | `voice` | 0 | 6 | 6K | 命令驱动语音会话（阶段 2 是**假会话**，不采音） |
 | `websocket_task` | 0 | 5 | 4K | **组件自带**：收包 → 同步跑 WS 回调（在 `ws.cpp` 钉核） |
 | ~~按键 / 编码器~~ | — | — | — | **无任务**：GPIO 中断 + esp_timer / LVGL indev |
@@ -134,6 +134,41 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 ---
 
 ## 5. 输入链路（阶段 1，**已全部解决**）
+
+### 5.0 阶段 3 新冒出来的两个按键问题 —— 已修（源码级定位）
+
+**症状**：① 开机 2.4 秒、用户没碰按键，冒出 `[按键] 录音键 松开 → voice_stop`；
+② `Guru Meditation Error: Core 0 panic'ed (**Interrupt wdt timeout on CPU0**)`，
+backtrace 停在 `button_edge_isr` → `esp_timer_restart` → `esp_timer_impl_get_time`。
+
+**① 误报"释放" —— 根因：`gpio_config()` 之后【立刻】采初值**
+
+```c
+ret = gpio_config(&io);                                   // 这一刻才使能上拉
+b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
+```
+引脚那一刻还没稳 → 读到低 → `last_settled` 记成"按下" → 等它稳下来触发一次边沿 →
+消抖后对比发现变了 → **误报一条"释放"**。
+**修法**：连采到"连续 10 次不变"（最多 100ms）再定初值；并打印实际稳定电平。
+
+**② Interrupt WDT —— 根因：`esp_timer_restart` 从 ISR 里调【安全但不轻】**
+
+读 `esp_timer.c:135-177`，它做的是：
+`timer_list_lock()`（`portENTER_CRITICAL_SAFE` = **屏蔽中断**）→ 读 systimer + 64 位乘除
+→ **`timer_remove()` 从有序链表摘出来** → **`timer_insert()` 再遍历一次插回去** → 解锁。
+
+按键抖动/引脚噪声时 ISR 被反复重入，每次都要屏蔽一遍中断 → **CPU0 几乎 100% 泡在 ISR 里**
+→ 中断看门狗（300ms）永远轮不上 → panic。
+**修法**：ISR 里加"**同一个 tick 内只做一次**"的限流（`xTaskGetTickCountFromISR` 只是读变量，
+比 `esp_timer_restart` 便宜几个数量级），上限 100 次/秒，对 50ms 消抖完全够。
+
+**诊断手段（已加）**：`button_edge_isr_count()` 累计中断次数 ——
+每次上报时打"期间中断 N 次"，并在 voice 的每秒 `level=` 日志里打累计值。
+**正常一次按键 = 几次~几十次；几百/几千 = 引脚在噪声里翻转**（接触不良/悬空/上拉没接上）。
+
+> ⚠️ 硬件侧仍未定案：面包板 + **无并联电容** + 10k 外部上拉。
+> **决定性测试**：把 IO10 用一根线**直接短到 3.3V**，看还冒不冒事件。
+> 不冒 → 接线/按键问题；还冒 → GPIO 配置或软件问题。
 
 ### ✅ 5.1 编码器无反应 —— 已修复（源码级定位）
 
@@ -273,10 +308,14 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | **钉核必须设 `task_core_id_set = true`**（`esp_websocket_client.h:129`）。组件实现是 `if (config->task_core_id_set) cfg->task_core_id = ...; else cfg->task_core_id = tskNO_AFFINITY;`（`esp_websocket_client.c:369-372`） | ⚠️ **REBUILD.md 漏了这个字段**：只写 `cfg.task_core_id = 0` **无效**，会被当成"未设置"而走 `tskNO_AFFINITY`。因为 0 本身是合法核号，所以组件专门加了个 bool 开关。`ws.cpp::init()` 已按要求写全 |
 | 组件任务默认 `WEBSOCKET_TASK_CORE_ID=tskNO_AFFINITY`、`PRIORITY=5`、`STACK=4K`（`esp_websocket_client.c:33-35`） | `task_prio/task_stack` 留 0 会用这些默认值 |
 | **回调跑在组件任务里，且是同步内联**：`dispatch_event()` 先 `esp_event_post_to(...)` 再**紧接着** `esp_event_loop_run(handle, 0)`；而 event loop 建的时候 `.task_name = NULL`（不建任务）→ 在调用者(websocket_task)上下文同步执行 | ✅ REBUILD 坑#1 属实。我们的 `ws_keeper`/`voice_task` **完全不参与收包** |
-| **回调期间持有 `client->lock`**：主循环是 `xSemaphoreTakeRecursive(client->lock)` → `recv()` → 里面调 `dispatch_event()`（`esp_websocket_client.c:1397-1402` / `1118`） | ★★ **回调里绝对不能阻塞**。所以 `stream_q` 用 `xQueueOverwrite`（天生不阻塞），`resp_q` 必须 `xQueueSend(..., 0)`。**用 `portMAX_DELAY` 会让整个 WS 收发死锁**（TX/RX 共用这把锁）。另：回调里别做耗时 `printf` |
+| **回调期间持有 `client->lock`**：主循环是 `xSemaphoreTakeRecursive(client->lock)` → `recv()` → 里面调 `dispatch_event()`（`esp_websocket_client.c:1397-1402` / `1118`） | ★★ **回调里绝对不能阻塞**。所以 `stream_q` 用 `xQueueOverwrite`（天生不阻塞），`resp_q` 必须 `xQueueSend(..., 0)`。**用 `portMAX_DELAY` 会让整个 WS 收发死锁**（TX/RX 共用这把锁）|
+| ★ **组件在 `poll` 时是【放锁】的**（`esp_websocket_client.c:1380-1402`：先 `xSemaphoreGiveRecursive` → `esp_transport_poll_read(..., 1000)` → **有数据才** `TakeRecursive` → `recv` → `Give`）| 所以 `voice_task` 的 `send_audio` **不会**被"组件在等数据"卡住 —— 它只可能被"**单次回调的耗时**"卡住。排除了一大嫌疑 |
+| 🐛 **已修** WS 回调里的 `printf`/`fflush(stdout)`（`rtasr.cpp::accumulate`/`revise`） | 两个后果实测都踩到了：① 持 `client->lock` 打串口 → 拖住 `voice_task` 的 `send_audio`；② 往 UART 灌大量字符 → **UART 中断频繁触发**（那次 Interrupt WDT panic 的 `EPC1` 正是 `uart_hal_write_txfifo`），在 CPU0 上和 GPIO 中断一起把中断看门狗饿死。已降级为 `ESP_LOGD`（文字本来就通过 `m_cb` 交给 UI 了，再打一遍纯浪费）|
 | `CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK` **未开** → `client->lock` 一把递归锁 TX/RX 共用（`esp_websocket_client.c:816`） | ✅ REBUILD 坑#2 属实 → `voice_task`/`ws_keeper`/`websocket_task` **必须同核 CPU0**。递归锁保证了**同任务重入不死锁** |
 | `WS::set_handler()` 按 `type` **自带去重**；`WS::deinit()` **不清 handler 表** | → **重连不需要重新 `asr.attach()`**，handler 表挂在 WS 单例上会一直保留，`init()` 会把它们挂到新 client 的 event loop 上 |
 | 组件配了 `disable_auto_reconnect = true` / `disable_pingpong_discon = true` | **重连和保活必须由我们的 `ws_keeper` 负责**，别指望组件 |
+| 🐛 **已修** `esp_websocket_client_send_*` 的 `timeout` 是 **RTOS ticks，不是毫秒**（`esp_websocket_client.h:279` 明写 "in RTOS ticks"；组件 `:742` 才做 `timeout * portTICK_PERIOD_MS`） | **原 bug**：`ws.cpp` 把 `timeout_ms` 直接传进去 → `HZ=100` 时 `1000` 变成 **10000ms = 10 秒**。代价很具体：音频发一帧最多阻塞 10 秒，而 I2S DMA 缓冲只有 **128ms** → 这一整段音频全丢。**修法**：`ws.cpp` 加 `ws_timeout_ticks()` 统一换算，并把下限夹到 **1 tick**（`pdMS_TO_TICKS(1..9)==0`，而组件里 `timeout=0` 表示"不等待"而非"很短"）。现在 `WS_SEND_TIMEOUT_MS(1000)` 真的是 1 秒了 |
+| ⚠️ **发送阻塞 vs DMA 余量（尚未处理，待定）** | 修完单位后音频发送超时 = 1 秒，而 DMA 只有 **128ms** → 真卡住一次仍会丢约 0.9 秒音频；而且 `send_audio` 失败会**直接中止会话**（`voice.cpp:224`）。要再收紧就两条：① 把**音频**的发送超时单独降到 ~100ms（< DMA 容量）；② 把"失败"改成**丢这一帧继续**（连续丢太多才 abort），而不是立刻 abort。**先不动**：一帧 1.28KB，局域网正常只要几毫秒，实测不触发 |
 
 ### 业务层铁律
 
@@ -285,6 +324,9 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | ★ **`partial` 的路由只认 `WS::m_service`**（`ws.cpp:313`），而 `RtAsr::switch_service()` **只发消息、不改 `m_service`**（`rtasr.cpp:42`） | 切服务必须**成对**：`ws.set_service("text")` **+** `asr.switch_service("text", ...)`。漏第一句 → 语音 partial 被送去 chat 槽位（阶段2 是 NULL）→ `if (h != NULL)` 无 else、不打日志 → **识别文字静默消失**。旧代码在 `app_fsm.cpp:125-126` 就是成对写的 |
 | `RtAsr::handle_partial/final/revise` 三者只差"取到 text 之后干什么" | 已抽成 `extract_text()` + 三个薄壳（`rtasr.cpp`）。**别把 `revise` 并进 `final`**：`revise` 故意不触发 `m_cb`，合并会让 UI 收到假的"说完了" |
 | `WS::dispatch_msg` 里 `partial` **不走查表**，因为 `type=="partial"` 被"语音"和"LLM"两个服务共用，一维 `type` 分不出来 | 见上一条 |
+| ★ **现在只有 `voice_task` 切服务**（会话开头），`ws_keeper` **故意不切** | `ws_keeper` 原来在重连后会补一句 `set_service`+`switch_service`，那是**旧轮询式调度器的补丁**（怕"语音已经过去了但服务还没切"）。现在切服务和发 `start` 在同一个任务里顺序执行，中间还隔着 `svc_ok` 握手 → 那个场景不可能发生。**删掉它还有个好处**：`ws_keeper` 不再产生 `svc_ok` → `VOICE_SVC_ACKED` 的唯一生产者就是 `voice_session` 自己，不会被重连的确认误唤醒 |
+| 🐛 **已修** `voice_session` 的"等连接"循环（最长 15 秒）**不消费 `voice_q`** | 期间 `voice_task` 是 `voice_q` 唯一的消费者，一不消费：① 深度只有 4，按几次就满 → 后续按键被 `xQueueSend(...,0)` 丢弃；② **`VOICE_STOP` 也一起丢 → 用户松手被忽略** → 连上后照常录一段用户不要的会话。实测踩过开机 2.4s（还没连上）打出 `voice_q 满, VOICE_STOP 丢弃`。已抽 `voice_q_drain()` 并在**所有等待循环**里调用（发现 STOP 就取消本轮） |
+| ★ **`voice_session` 会等服务器回 `svc_ok` 才发 `start`**（`wait_svc_ok()`，上限 300ms） | 信号链：服务器回 `svc_ok` → `ws.cpp:331` 调 `m_svc_ok_cb` → `UiBridge::on_svc_ok` → 投 `VOICE_SVC_ACKED`。**实测网关对重复的 `svc` 也照回 ack（61~63ms，5/5）** → 300ms 有 5 倍余量，不需要"超时也放行"的兜底 |
 
 ### 消息载荷的约定（`bus_msg.hpp`）★ 改动前务必先读
 
@@ -296,7 +338,7 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | **状态统一走 `status_kind_t`**（CONNECTED/DISCONNECTED/RECONNECTING/STARTED/ENDED/ABORTED） | 不管哪个服务，报给 LVGL 的状态都写进这个枚举；投递用 `post_resp_status(kind, status)`。**标签仍按服务分**（`RESP_ASR_STATUS` / `RESP_WS_STATUS`）以保留"谁报的" |
 | 三个投递接口最后都走 **`post_resp_msg()`** 入队 | 那是 `resp_q` 的**唯一入队点**：`timeout=0` 的硬要求和"满了告警"只写一份。加新载荷类型时，调用方自己填 `resp_msg_t` 再调 `post_resp_msg()` 即可，**不用改 UiBridge** |
 | `voice_cmd_msg_t.arg` 是**标量参数槽位**（4 字节），当前**全部传 0、没人读** | 装不下文本；**更不要拿它塞指针**（32 位机上 `int32_t` 和指针同宽，编译通过但会引入悬空） |
-| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 重连循环约 1 轮/秒，`resp_q` 深度只有 16 —— 无脑投递十几秒就满，开始丢消息（含 `RESP_ASR_FINAL`）。故只在**状态变化**时投一条；`DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 |
+| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 只在**状态变化**时投一条，理由有两条：① 状态没变还重复投，UI 每 50ms 会刷出同一句话（白白重绘）；② `DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 —— 免得 UI 一上来就说"断线"。**注意：这不是"防队列溢出"** —— 消费者 `lv_timer` 每轮把 `resp_q` 取空，重连循环 5 条/秒远低于消费能力 |
 
 ### 已确认可用的重载/配置
 
@@ -356,14 +398,21 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
   2. `ui_bridge: 就绪: voice_q=4 resp_q=16 stream_q=1 (共约 8932 字节内部 SRAM)`
      ← **8932 这个数是"消息结构没被改坏"的硬指标**，改 `resp_msg_t`/union 后必须对照
   3. `ui_bridge: [结果] kind=2 ... status=0`（`RESP_WS_STATUS` + `CONNECTED`）
-  4. `ws_keeper: 网关已连接, 已切到 text 服务`（服务器回 `svc_ok`）
+  4. `ws_keeper: 网关已连接 (服务由 voice_task 在会话开头切换)`
   5. **阶段 1 无回归**：转编码器仍切屏、按键仍一次一沿、**无 Task WDT**
-  6. 按 IO10 → `status=3`(STARTED) → `voice: 已发送 start` → 1s 后 `已发送 end` → `status=4`(ENDED)
+  6. 按 IO10 → `status=3`(STARTED) → `voice: 服务器已确认切到 text` → `已发送 start`
+     → `采音开始 (每帧 1280 字节 / 40ms)` → 松开 → `会话结束 (正常), 共发 N 帧` → `status=4`(ENDED)
+     （`N ≈ 按住秒数 × 25`，因为每帧 40ms）
   7. 按 IO8 → **只有** `[按键] 服务键 按下 (IO8 未接业务)`，**不投任何队列**
   8. 拔网线 → `status=1`(DISCONNECTED) → `status=2`(RECONNECTING) → 插回 → `status=0`(CONNECTED)
-- 📌 **阶段 3 待做**：`voice_session` 的假会话换成真采音循环（骨架已写在 `voice.cpp` 注释里，
-  含三个必须注意的边界：读失败不能发包 / STOP 检查别被 `continue` 跳过 / 发送阻塞会吃 128ms DMA 余量）。
-  同时把 `drain_queues()` 里的 log 换成真正的 `switch (r.kind)` 上屏（那个 if/else 就是雏形）。
+  9. **快速点按**（按下即松）→ `voice: 等 svc_ok 期间用户已松手 (快速点按), 本轮取消`，不崩、不留残留会话
+  10. `voice: level=xxx` —— 每次会话每秒一条，用于标定 `VOICE_SPEECH_LEVEL`（见 §6 音量那段）
+- 📌 **阶段 3 进行中**：**真采音循环已写完**（`voice_session`：等连接 → 切 text + 等 svc_ok → asr.start
+  → mic.start → 采音循环 → mic.stop + asr.end）。剩下的是 **UI 上屏**（还没做）：
+  把 `drain_queues()` 里的 log 换成真正的 `switch (r.kind)`（那个 if/else 就是雏形），
+  `stream_q` → 流式冒字，`RESP_ASR_FINAL` → 定格。
+  以及**待标定后接线**的"服务器无响应判定"（逻辑已写在 `voice.cpp:44-62` 注释里，
+  只差阈值 + `UiBridge::asr_last_ms()`）。
 - 📌 **阶段 4 待做（清理）**：`rtasr.cpp` 里 `printf` 在 WS 回调(持 `client->lock`)里跑，
   网络抖动时可能拖住发音频 → 降级为 `ESP_LOGD`；`queue` 是否改 `xQueueCreateStatic` + PSRAM。
 - 📌 **已知行为（未改，用户明确要求先不动）**：`lv_indev_read()` 在屏幕动画期间

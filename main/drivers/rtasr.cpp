@@ -140,35 +140,36 @@ void RtAsr::handle_revise(const char *payload, int len, void *ctx)
     }
 }
 
-/* 语音修正核心: 整体替换 buffer,换行重打整条(标记[修正]),不触发完成回调 */
+/* 语音修正核心: 整体替换 buffer, 不触发完成回调 */
 void RtAsr::revise(const char *text)
 {
     strlcpy(s_result, text, sizeof(s_result));
-    printf("\n[修正] %s", s_result);   /* 换行 + [修正] 前缀,直观看到修正处 */
-    fflush(stdout);
+    ESP_LOGD(TAG, "[修正] %s", s_result);
 }
 
-/* 累积核心: 增量追加(partial)或完整覆盖(final),并打印显示
- * is_final=false: strlcat 追加, 打印新增字(流式)
- * is_final=true:  strlcpy 覆盖, 打印完整结果(换行定格), 并触发 m_cb
+/* 累积核心: 增量追加(partial)或完整覆盖(final)。
+ * is_final=false: strlcat 追加; is_final=true: strlcpy 覆盖, 并触发 m_cb
  *
- * ★ 本函数(以及 revise)是**在 WS 回调里**跑的, 而 WS 回调由 websocket_task
+ * ★★ 本函数(以及 revise)是**在 WS 回调里**跑的, 而 WS 回调由 websocket_task
  *   在**持有 esp_websocket_client 的 client->lock** 的情况下调用。
- *   所以下面这两处 printf 属于"持锁期间的阻塞操作"(串口输出), 会拖住 voice_task
- *   发音频。当前音频只有 40ms/帧、DMA 缓冲 128ms, 实测扛得住;
- *   若将来出现"网络抖动时掉字", 优先把这里降级为 ESP_LOGD 或去掉
- *   (文字已经通过 m_cb 交给 UI 了, 没必要再往串口打一遍)。
- *   详见 HANDOFF §6「回调期间持 client->lock」。 */
-void RtAsr::accumulate(const char *text, bool is_final)
+ *   所以这里**绝对不能有耗时/阻塞操作**。
+ *
+ *   原实现是 printf + fflush(stdout), 有两个后果(实测都踩到了):
+ *     ① 持 client->lock 打串口 → 拖住 voice_task 的 send_audio
+ *     ② 往 UART 灌大量字符 → UART 中断频繁触发 (那次 Interrupt WDT panic 的
+ *        EPC1 正是 uart_hal_write_txfifo), 在 CPU0 上和 GPIO 中断一起
+ *        把中断看门狗饿死
+ *   而且**完全没必要**: 文字已经通过 m_cb 交给 UI 了, 再往串口打一遍是纯浪费。
+ *   故降级为 ESP_LOGD (默认不输出; 要看就 esp_log_level_set("rtasr", ESP_LOG_DEBUG)) */
+void RtAsr::accumulate(const char *text, bool is_final)  //< 拼接回复: 把增量文字拼在原有文字上
 {
     if (is_final) {
         strlcpy(s_result, text, sizeof(s_result));
-        printf("\n[识别] %s\n", s_result);   /* 完整结果: 换行定格 */
+        ESP_LOGD(TAG, "[识别] %s", s_result);      /* 完整结果 */
     } else {
         strlcat(s_result, text, sizeof(s_result));
-        printf("%s", text);   /* 流式: 只打印新增字符,不换行,字从行尾冒出来 */
+        ESP_LOGD(TAG, "%s", text);                 /* 流式增量 */
     }
-    fflush(stdout);
 
     if (m_cb != NULL) {
         m_cb(s_result, is_final, m_cb_ctx);   /* 交给调度层(现在是 UiBridge → 投队列) */

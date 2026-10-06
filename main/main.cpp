@@ -37,8 +37,8 @@ static const char *TAG = "Main";
  * ================================================================ */
 
 /* 按键引脚 */
-#define BTN_REC_PIN   GPIO_NUM_10   /* IO10: 录音键(按下为低,内部上拉) */
-#define BTN_SVC_PIN   GPIO_NUM_8    /* IO8:  服务切换键(按下为低,内部上拉) */
+#define BTN_REC_PIN   GPIO_NUM_2   /* IO2: 录音键(按下为低,内部上拉) */
+#define BTN_SVC_PIN   GPIO_NUM_42    /* IO42:  服务切换键(按下为低,内部上拉) */
 
 /* ★ 必须静态: WiFi::init() 会把 this 交给 esp_event 永久持有
  *   (esp_event_handler_register(..., this))。若放在 app_main 栈上,

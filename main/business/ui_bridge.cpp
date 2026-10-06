@@ -42,6 +42,10 @@ esp_err_t UiBridge::init(void)
     m_asr.attach(WS::get());
     m_asr.set_result_callback(&UiBridge::on_asr_result, this);
 
+    /* ★ 服务器的 svc_ok → 投 VOICE_SVC_ACKED, 唤醒在等"切服务完成"的 voice_session。
+     *  驱动(WS)不认识业务, 只回调一个函数指针 —— 和上面 set_result_callback 一个套路。 */
+    WS::get().set_svc_ok_callback(&UiBridge::on_svc_ok, this);
+
     ESP_LOGI(TAG, "就绪: voice_q=%d resp_q=%d stream_q=%d (共约 %u 字节内部 SRAM)",
              VOICE_Q_LEN, RESP_Q_LEN, STREAM_Q_LEN,
              (unsigned)(VOICE_Q_LEN * sizeof(voice_cmd_msg_t)
@@ -65,18 +69,18 @@ bool UiBridge::push_voice_cmd(voice_cmd_t cmd, int32_t arg)
 
 bool UiBridge::voice_start(void)
 {
-    bool ok = push_voice_cmd(CMD_VOICE_START, 0);
+    bool ok = push_voice_cmd(VOICE_START, 0);
     if (!ok) {
-        ESP_LOGW(TAG, "voice_q 满, CMD_VOICE_START 丢弃");
+        ESP_LOGW(TAG, "voice_q 满, VOICE_START 丢弃");
     }
     return ok;
 }
 
 bool UiBridge::voice_stop(void)
 {
-    bool ok = push_voice_cmd(CMD_VOICE_STOP, 0);
+    bool ok = push_voice_cmd(VOICE_STOP, 0);
     if (!ok) {
-        ESP_LOGW(TAG, "voice_q 满, CMD_VOICE_STOP 丢弃");
+        ESP_LOGW(TAG, "voice_q 满, VOICE_STOP 丢弃");
     }
     return ok;
 }
@@ -151,7 +155,19 @@ void UiBridge::on_asr_result(const char *text, bool is_final, void *ctx)
     }
 }
 
-void UiBridge::drain_queues(void)
+/* svc_ok 回调: 同 on_asr_result, 跑在 websocket_task 且持着 client->lock
+ * → 只做一次非阻塞投递 (timeout=0), 绝不阻塞。 */
+void UiBridge::on_svc_ok(const char *service, void *ctx)
+{
+    (void)service;   /* 当前只有一个服务(text), 不需要区分; 以后多服务时可用 */
+    UiBridge *self = static_cast<UiBridge *>(ctx);
+    if (self == nullptr) {
+        return;
+    }
+    self->push_voice_cmd(VOICE_SVC_ACKED, 0);
+}
+
+void UiBridge::drain_queues(void)   //< LVGL用来switch队列的接口
 {
     /* ★ 两个消息体各约 0.5KB, 而本函数跑在 lvgl 任务(栈 6K, 且 lv_timer_handler
      *   内部还会嵌套调用)里 → 放 static 里, 不从本来就紧张的栈上再抠 1KB。

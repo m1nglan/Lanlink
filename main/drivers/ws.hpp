@@ -22,6 +22,11 @@
  * payload: null 终止的完整 JSON 字符串(WS 已补 \0); len: 原始长度; ctx: set_handler 传入 */
 typedef void (*ws_msg_handler_t)(const char *payload, int len, void *ctx);
 
+/* 服务器确认服务切换完成的回调 —— 驱动不认识业务, 由业务注册 (同 set_handler 套路)。
+ * service: 本地刚请求切换到的服务名。
+ * ★ 回调跑在 websocket_task 且**持着 client->lock** → 里面只能做非阻塞操作。 */
+typedef void (*ws_svc_ok_cb_t)(const char *service, void *ctx);
+
 /*!
  * 统一服务网关 WebSocket 连接驱动(单例,一条长连接,应用层按 type 分发)
  *
@@ -52,6 +57,10 @@ public:
 
     /*! 注册 partial 处理器(按服务区分): "text"=语音增量, "llm"=对话流式 */
     void set_partial_handler(const char *service, ws_msg_handler_t cb, void *ctx);
+
+    /*! 注册 svc_ok 回调 —— 收到服务器"服务切换完成"确认时调用。
+     *  voice_session 要靠它才知道"服务器真的切好了", 才敢发 start。 */
+    void set_svc_ok_callback(ws_svc_ok_cb_t cb, void *ctx);
 
     /*! 记录当前服务(用于区分 partial 属于语音还是对话流式) */
     void set_service(const char *service) { m_service = service; }
@@ -88,6 +97,10 @@ private:
     void *m_partial_text_ctx = NULL;
     ws_msg_handler_t m_partial_chat_cb = NULL;
     void *m_partial_chat_ctx = NULL;
+
+    /* svc_ok 回调: 服务器确认切换完成 → 通知在等它的人 (voice_session) */
+    ws_svc_ok_cb_t m_svc_ok_cb  = NULL;
+    void          *m_svc_ok_ctx = NULL;
 
     esp_websocket_client_handle_t m_ws = NULL;
     volatile bool m_connected = false;

@@ -46,8 +46,7 @@ static void report_ws_status(status_kind_t sta)
 static void ws_keeper_task(void *arg)
 {
     (void)arg;
-    WS    &ws  = WS::get();
-    RtAsr &asr = UiBridge::get().asr();
+    WS &ws = WS::get();
 
     uint32_t last_ping_ms  = 0;
     bool     was_connected = false;   /* 用于区分"断线"和"开机就没连上" */
@@ -74,20 +73,18 @@ static void ws_keeper_task(void *arg)
                 continue;
             }
 
-            /* ★★ 这两句必须**成对**, 缺一不可 ——
-             *   ① set_service 决定 partial 消息往哪个槽位路由 (语音 vs LLM)
-             *   ② switch_service 才是"通知服务器切服务"
-             *   漏掉 ① 的后果是**静默的**: 语音 partial 会被送去 chat 槽位,
-             *   而那个槽位本阶段是 NULL, ws.cpp 里 `if (h != NULL)` 不报错 →
-             *   识别文字凭空消失, 串口一条日志都没有。
-             *   (旧代码在 app_fsm.cpp:125-126 就是成对写的) */
-            ws.set_service("text");
-            asr.switch_service("text", WS_SEND_TIMEOUT_MS);
+            /* ★ 这里**故意不切服务** (以前重连后会 ws.set_service + asr.switch_service)。
+             *   那是旧调度器留下的补丁: 轮询式 FSM 里可能出现"语音已经过去了,
+             *   但服务还没切"。现在切服务和发 start 都在 voice_task 里顺序执行,
+             *   中间还隔着 svc_ok 握手 → 那个场景不可能发生了。
+             *   顺带好处: ws_keeper 不再产生 svc_ok → VOICE_SVC_ACKED 的唯一生产者
+             *   就是 voice_session 自己, 不会被重连的确认误唤醒。
+             *   路由用的 WS::m_service 默认值就是 "text" (ws.hpp), 不用设。 */
 
             last_ping_ms  = now_ms();
             was_connected = true;
             report_ws_status(CONNECTED);
-            ESP_LOGI(TAG, "网关已连接, 已切到 text 服务");
+            ESP_LOGI(TAG, "网关已连接 (服务由 voice_task 在会话开头切换)");
             continue;   /* 立刻回去跑保活逻辑 */
         }
 

@@ -18,12 +18,12 @@
  * ================================================================ */
 
 /* ------------------ 引脚 ------------------ */
-#define LCD_PIN_SCLK    (GPIO_NUM_21)
-#define LCD_PIN_MOSI    (GPIO_NUM_20)
-#define LCD_PIN_RST     (GPIO_NUM_19)
-#define LCD_PIN_DC      (GPIO_NUM_47)
-#define LCD_PIN_CS      (GPIO_NUM_48)
-#define LCD_PIN_BL      (GPIO_NUM_45)
+#define LCD_PIN_SCLK    (GPIO_NUM_9)
+#define LCD_PIN_MOSI    (GPIO_NUM_46)
+#define LCD_PIN_RST     (GPIO_NUM_3)
+#define LCD_PIN_DC      (GPIO_NUM_8)
+#define LCD_PIN_CS      (GPIO_NUM_18)
+#define LCD_PIN_BL      (GPIO_NUM_17)
 #define LCD_BL_ON_LEVEL (1)                     /*!< 背光点亮电平 */
 
 /* ------------------ 分辨率 / 时钟 ------------------ */

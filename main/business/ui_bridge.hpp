@@ -31,8 +31,14 @@ public:
      *  只做"登记", 与是否已建连无关 → 全程调用一次即可。 */
     esp_err_t init(void);
 
-    /*! 全局常驻的 RtAsr (坑#4: 回调 ctx 生命周期 = 系统进程)。
-     *  voice_task / ws_keeper 都从这里拿同一个实例。 */
+    /*! 全局常驻的 RtAsr —— 目前**只有 voice_task** 取它
+     *  (ws_keeper 不碰语音: 服务切换已移交 voice_task 在会话开头做)。
+     *
+     *  ★ 为什么必须由 UiBridge 持有 (坑#4): init() 把它的**地址**交给了 WS ——
+     *      m_asr.attach(WS::get())               → 注册 partial/final/revise, ctx = this
+     *      m_asr.set_result_callback(..., this)  → 结果回调的 ctx
+     *    WS 的回调表里存着这个地址 → 生命周期必须 = 系统进程。
+     *    若放在 voice_task 栈上或循环里重建, 回调就会踩到已释放的内存。 */
     RtAsr& asr(void) { return m_asr; }
 
     /* ---------------- 触发接口 (任意上下文可调, 全部非阻塞) ---------------- */
@@ -83,6 +89,10 @@ private:
 
     /*! WS 回调 (跑在 websocket_task, 且持着 client->lock) → 投队列 */
     static void on_asr_result(const char *text, bool is_final, void *ctx);
+
+    /*! WS 回调: 服务器确认服务切换完成 → 投 VOICE_SVC_ACKED 唤醒在等的 voice_session。
+     *  同 on_asr_result, 跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
+    static void on_svc_ok(const char *service, void *ctx);
 
     bool push_voice_cmd(voice_cmd_t cmd, int32_t arg); 
 

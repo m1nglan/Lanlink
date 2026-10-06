@@ -7,6 +7,8 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 
+#include "freertos/FreeRTOS.h"   /* pdMS_TO_TICKS / TickType_t */
+
 #include "apikey.h"
 
 static const char *TAG = "ws";
@@ -153,12 +155,36 @@ void WS::set_partial_handler(const char *service, ws_msg_handler_t cb, void *ctx
     }
 }
 
+void WS::set_svc_ok_callback(ws_svc_ok_cb_t cb, void *ctx)
+{
+    m_svc_ok_cb  = cb;
+    m_svc_ok_ctx = ctx;
+}
+
+/* ★★ 单位换算: esp_websocket_client 的 timeout 参数是 **RTOS ticks, 不是毫秒**
+ *   (头文件 esp_websocket_client.h:279 明写 "Write data timeout in RTOS ticks";
+ *    组件内部 :742 才是 `timeout * portTICK_PERIOD_MS`, 即它自己按 ticks 用)。
+ *
+ *   ⚠️ 不换算的后果: CONFIG_FREERTOS_HZ=100 时, 传 1000 会被当成 1000 ticks
+ *      = **10000 ms = 10 秒**, 而代码里那个常量叫 WS_SEND_TIMEOUT_MS(1 秒)。
+ *      10 秒的代价很具体: 音频发一帧阻塞 10 秒 → 采音循环 10 秒没读 DMA,
+ *      而 DMA 缓冲只有 128ms → 这一整段音频全丢。
+ *
+ *   ⚠️ 下限必须夹到 1 tick: pdMS_TO_TICKS(1..9) == 0 @HZ=100,
+ *      而组件里 timeout=0 表示"不等待"(拿不到锁立即失败), 不是"很短"。 */
+static TickType_t ws_timeout_ticks(uint32_t timeout_ms)
+{
+    TickType_t t = pdMS_TO_TICKS(timeout_ms);
+    return (t < 1) ? 1 : t;
+}
+
 esp_err_t WS::send_text(const char *text, uint32_t timeout_ms)
 {
     if (m_ws == NULL || !m_connected) {
         return ESP_ERR_INVALID_STATE;
     }
-    int sent = esp_websocket_client_send_text(m_ws, text, (int)strlen(text), timeout_ms);
+    int sent = esp_websocket_client_send_text(m_ws, text, (int)strlen(text),
+                                              ws_timeout_ticks(timeout_ms));   /* ★ ms→ticks */
     if (sent < 0) {
         ESP_LOGE(TAG, "发送文本失败 ret=%d", sent);
         /* 不置 m_connected=false: 连接死活由 is_stale()(超时无数据)判断,
@@ -173,7 +199,8 @@ esp_err_t WS::send_bin(const uint8_t *data, size_t len, uint32_t timeout_ms)
     if (m_ws == NULL || !m_connected) {
         return ESP_ERR_INVALID_STATE;
     }
-    int sent = esp_websocket_client_send_bin(m_ws, (const char *)data, (int)len, timeout_ms);
+    int sent = esp_websocket_client_send_bin(m_ws, (const char *)data, (int)len,
+                                             ws_timeout_ticks(timeout_ms));    /* ★ ms→ticks */
     if (sent < 0) {
         ESP_LOGE(TAG, "发送二进制失败 ret=%d", sent);
         return ESP_FAIL;
@@ -319,6 +346,12 @@ void WS::dispatch_msg(const char *msg, int len)
     }
     if (strcmp(type, "svc_ok") == 0) {
         ESP_LOGI(TAG, "服务切换成功: %s", msg);
+        /* ★ 这才是"服务器已切好"的**真信号** —— 通知在等它的人。
+         *   (voice_session 原来只能盲等 300ms, 服务器慢一点就会
+         *    "在旧服务上发 start", 而那种错是静默的) */
+        if (m_svc_ok_cb != NULL) {
+            m_svc_ok_cb(m_service, m_svc_ok_ctx);
+        }
         return;
     }
     if (strcmp(type, "pong") == 0) {

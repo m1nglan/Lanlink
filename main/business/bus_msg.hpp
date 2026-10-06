@@ -26,10 +26,11 @@
  * ★ 消费者只有 voice_task 一个任务 —— 所以它就叫 voice_q */
 
 typedef enum {
-    CMD_NONE = 0,
-    CMD_VOICE_START,     /*!< 按下录音键 → 开始一轮语音会话 */
-    CMD_VOICE_STOP,      /*!< 松开录音键 → 结束本轮 (voice 在帧边界 peek 到) */
-    CMD_LLM_CHAT_TEXT,   /*!< 预留: 把文本发给 LLM (本阶段不实现) */
+    VOICE_NONE = 0,
+    VOICE_START,             /*!< 按下录音键 → 开始一轮语音会话 */
+    VOICE_STOP,              /*!< 松开录音键 → 结束本轮 (voice 在帧边界 peek 到) */
+    VOICE_LLM_CHAT_TEXT,     /*!< 预留: 把文本发给 LLM (本阶段不实现) */
+    VOICE_SVC_ACKED      /*!< 服务器已确认服务切换完成 (ws.cpp 收到 svc_ok 时投递) */
 } voice_cmd_t;
 
 typedef struct {
