@@ -340,6 +340,18 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 | `voice_cmd_msg_t.arg` 是**标量参数槽位**（4 字节），当前**全部传 0、没人读** | 装不下文本；**更不要拿它塞指针**（32 位机上 `int32_t` 和指针同宽，编译通过但会引入悬空） |
 | 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 只在**状态变化**时投一条，理由有两条：① 状态没变还重复投，UI 每 50ms 会刷出同一句话（白白重绘）；② `DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 —— 免得 UI 一上来就说"断线"。**注意：这不是"防队列溢出"** —— 消费者 `lv_timer` 每轮把 `resp_q` 取空，重连循环 5 条/秒远低于消费能力 |
 
+### 消息载荷的约定（`bus_msg.hpp`）★ 改动前务必先读
+
+| 事实 | 含义 |
+|---|---|
+| `resp_msg_t` 的载荷是 **union**（`u.text[512]` / `u.i32` / `u.f32` / `u.sta`），**`kind` 决定读哪一项** | 消费端**必须**先看 `kind` 再取 `u` —— 拿状态类的消息去读 `u.text` 会打出乱码（`drain_queues` 里已按 kind 分支） |
+| **union 成员必须是"平凡类型"，且不得含指针** | 队列靠 `memcpy` 搬字节，只保护这 512 字节本身。成员里若放了 `char*`，等于把值拷贝退回成"指针 + 一块无人保护的内存"（悬空/被改写）。要放字符串就用**内联定长数组** |
+| union 大小 = **最大成员**（现为 `text[512]`）→ `resp_msg_t` 恒为 **524 字节** | 新增成员只要 ≤ 512，**队列内存不变**（实测总数 8932）。加了 8 字节对齐的类型（某些 ABI 下 `double`）会让结构体涨到 528 —— 加完请对照那行启动日志 |
+| **状态统一走 `status_kind_t`**（CONNECTED/DISCONNECTED/RECONNECTING/STARTED/ENDED/ABORTED） | 不管哪个服务，报给 LVGL 的状态都写进这个枚举；投递用 `post_resp_status(kind, status)`。**标签仍按服务分**（`RESP_ASR_STATUS` / `RESP_WS_STATUS`）以保留"谁报的" |
+| 三个投递接口最后都走 **`post_resp_msg()`** 入队 | 那是 `resp_q` 的**唯一入队点**：`timeout=0` 的硬要求和"满了告警"只写一份。加新载荷类型时，调用方自己填 `resp_msg_t` 再调 `post_resp_msg()` 即可，**不用改 UiBridge** |
+| `voice_cmd_msg_t.arg` 是**标量参数槽位**（4 字节），当前**全部传 0、没人读** | 装不下文本；**更不要拿它塞指针**（32 位机上 `int32_t` 和指针同宽，编译通过但会引入悬空） |
+| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 重连循环约 1 轮/秒，`resp_q` 深度只有 16 —— 无脑投递十几秒就满，开始丢消息（含 `RESP_ASR_FINAL`）。故只在**状态变化**时投一条；`DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 |
+
 ### 已确认可用的重载/配置
 
 - `ui_chat` 屏**已有现成对话控件**：`ui_metext`（我说的，绿气泡）/ `ui_restext`（回复，深色气泡）——微信式布局已画好，等接数据。

@@ -54,10 +54,16 @@ stream_q (深度1 覆盖队列)      ← 流式: ASR partial 增量文本
 ## 消息结构（`business/bus_msg.hpp`）
 
 ```cpp
+<<<<<<< HEAD
 typedef enum { VOICE_NONE=0, VOICE_START, VOICE_STOP,
                VOICE_LLM_CHAT_TEXT,     // 未来
                VOICE_SVC_ACKED }         // 服务器确认服务切换完成
              voice_cmd_t;
+=======
+typedef enum { CMD_NONE=0, CMD_VOICE_START, CMD_VOICE_STOP,
+               CMD_LLM_CHAT_TEXT,       // 未来
+} voice_cmd_t;
+>>>>>>> a1ed6da9960213ad37f9e63b9a91f98d1dc09605
 typedef struct { voice_cmd_t cmd; int32_t arg; } voice_cmd_msg_t;   // 8B (arg=标量参数, 当前全 0)
 
 typedef enum { STREAM_ASR_PARTIAL=0, STREAM_LLM_PARTIAL } stream_kind_t;
@@ -136,7 +142,11 @@ static void voice_task(void*) {
     while (1) {
         voice_cmd_msg_t m;
         if (xQueueReceive(s_voice_q, &m, portMAX_DELAY) != pdTRUE) continue;
+<<<<<<< HEAD
         if (m.cmd==VOICE_START && !recording) recording = voice_session(mic);
+=======
+        if (m.cmd==CMD_VOICE_START && !recording) recording = voice_session(mic);
+>>>>>>> a1ed6da9960213ad37f9e63b9a91f98d1dc09605
     }
 }
 static bool voice_session(I2sMic &mic) {
@@ -146,7 +156,11 @@ static bool voice_session(I2sMic &mic) {
     static int16_t pcm[I2S_MIC_FRAME_BYTES/2];
     while (1) {
         if (mic.read_frame(pcm,sizeof(pcm),40)==ESP_ERR_TIMEOUT) continue;
+<<<<<<< HEAD
         if (xQueueReceive(s_voice_q,&m,0)==pdTRUE && m.cmd==VOICE_STOP) break;  // 帧尾peek
+=======
+        if (xQueueReceive(s_voice_q,&m,0)==pdTRUE && m.cmd==CMD_VOICE_STOP) break;  // 帧尾peek
+>>>>>>> a1ed6da9960213ad37f9e63b9a91f98d1dc09605
         if (!ws.is_connected()) { report(VOICE_ABORTED); mic.stop(); asr.end(100); return false; }
         if (asr.send_audio((uint8_t*)pcm,sizeof(pcm),WS_SEND_TIMEOUT_MS)!=ESP_OK){ /*abort*/ }
     }
@@ -160,7 +174,11 @@ STOP 最坏延迟 = 帧边界 40ms + 消抖 15ms ≈ <60ms（协议固有，勿�
 
 - ANYEDGE 中断 ISR **只做 `esp_timer_restart(tmr, 15000)`**（IRAM 安全）；15ms 无新中断后 timer 回调（esp_timer 任务上下文）读稳定电平，与上次比较，变了触发对应沿。
 - 回调在普通任务上下文 → 投 voice_q 安全（8B 非阻塞）。
+<<<<<<< HEAD
 - IO10 按下→`VOICE_START`，释放→`VOICE_STOP`；IO8 只留钩子 log。
+=======
+- IO10 按下→`CMD_VOICE_START`，释放→`CMD_VOICE_STOP`；IO8 只留钩子 log。
+>>>>>>> a1ed6da9960213ad37f9e63b9a91f98d1dc09605
 
 ## 聊天历史与上屏（后续阶段，本次留接口）
 
