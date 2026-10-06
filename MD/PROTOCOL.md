@@ -151,12 +151,12 @@ typedef struct {
     uint32_t    flags;
     uint32_t    t_ms;
     union {
-        char          text[BUS_TEXT_LEN_SHORT];   /* 512, 只用于短提示 */
+        char          text[BUS_TEXT_LEN_SHORT];   /* 64, 只用于短提示 */
         int32_t       i32;
         float         f32;
         status_kind_t sta;
     } u;
-} resp_msg_t;               /*!< 约 524 字节 (不变) */
+} resp_msg_t;               /*!< 76 字节 (V1 是 524 —— u.text 512 缩到 64) */
 ```
 
 **`RESP_ASR_FINAL` / `RESP_LLM_FINAL` 退休** —— "完成"由 `stream_msg_t.is_final` 表达。
@@ -164,13 +164,22 @@ typedef struct {
 ### 3.3 内存账
 
 ```
-stream_msg_t:     4 + 4 + 2048 = 2056  × 1  =  2056 B
-resp_msg_t:       4 + 4 + 4 + 512 = 524 × 16 = 8384 B
-voice_cmd_msg_t:  8                     × 4  =    32 B
-──────────────────────────────────────────────────
-                                  合计 ≈ 10472 B 内部 SRAM
-                        (V1 是 8932 B → **+1.5 KB**)
+stream_msg_t:     4 + 4 + 2048     = 2056  × 1  =  2056 B
+resp_msg_t:       4 + 4 + 4 + 64   =   76  × 16 =  1216 B
+voice_cmd_msg_t:  8                        × 4  =    32 B
+────────────────────────────────────────────────────────
+                            合计 ≈ 3304 B 内部 SRAM
+                     (V1 是 8932 B → **−5.6 KB**)
 ```
+
+**为什么总量反而变小了：`resp_q` 里的 `u.text` 从 512 缩到 64。**
+
+> V1 时代 `RESP_ASR_FINAL` 走 `resp_q`，完整句子塞在 `u.text` 里 → 需要 512 字节。
+> V2 之后识别结果/LLM 回复全归 `stream_q`（深 1），`resp_q` 退化成**纯状态通道**，
+> 那个 512 就成了空气：`512 × 16 = 8384 B` 白占，而每条实际只用 `u.sta` 的 4 字节。
+> 缩到 64（≈21 汉字，够放"服务切换超时"这类提示）后 `resp_q` 从 8384 掉到 1216。
+>
+> **这就是"长文本只走覆盖式队列"这条原则的额外收益** —— 它同时让两条队列都变省了。
 
 **代价可接受，换来"消费者零状态"。**
 
@@ -207,7 +216,7 @@ voice_cmd_msg_t:  8                     × 4  =    32 B
 
 | # | 文件 | 改动 |
 |---|---|---|
-| 1 | `business/bus_msg.hpp` | `BUS_TEXT_LEN` 512→2048；`stream_msg_t` 加 `is_final`；`stream_kind_t` 改名 `STREAM_ASR`/`STREAM_LLM`；`resp_kind_t` 去掉 `RESP_ASR_FINAL`/`RESP_LLM_FINAL`；加 `BUS_TEXT_LEN_SHORT`=512 |
+| 1 | `business/bus_msg.hpp` | `BUS_TEXT_LEN` 512→2048；`stream_msg_t` 加 `is_final`；`stream_kind_t` 改名 `STREAM_ASR`/`STREAM_LLM`；`resp_kind_t` 去掉 `RESP_ASR_FINAL`/`RESP_LLM_FINAL`；**新增 `BUS_TEXT_LEN_SHORT`=64**（V1 的 512 是留给 `resp_q` 装完整句的，V2 不用了）|
 | 2 | `drivers/rtasr.cpp` | `accumulate()` 一律 `strlcpy`（不再 `strlcat`）；**删掉 `revise()` 和 `handle_revise()`**；`handle_partial` 改名 `handle_asr`；**注册 `"asr"`**（不再注册 `"partial"`/`"revise"`）|
 | 3 | `drivers/rtasr.hpp` | 对应改名 |
 | 4 | `drivers/llm.cpp` | `handle_partial` **累积到 `s_reply`**，再把 **`s_reply`（全量）** 投总线；`chat()` 时清 `s_reply`；`handle_reply` 覆盖 `s_reply` 并标 `is_final` |
@@ -280,7 +289,7 @@ send({"type": "asr", "text": sentence})
 
 | # | 看什么 | 期望 |
 |---|---|---|
-| 1 | 启动日志 `ui_bridge: 就绪: voice_q=4 resp_q=16 stream_q=1 (共约 10472 字节…)` | 内存变大但正常 |
+| 1 | 启动日志 `ui_bridge: 就绪: voice_q=4 resp_q=16 stream_q=1 (共约 3304 字节…)` | **比 V1 的 8932 还小** ✓ |
 | 2 | 说话时 `[流式] kind=0 final=0 text="..."` | **text 每次都是完整句，逐步变长** |
 | 3 | 松开后 `[流式] kind=0 final=1 text="..."` | **完整句 + final=1** |
 | 4 | 屏幕 | 逐句冒字 → 定格 |

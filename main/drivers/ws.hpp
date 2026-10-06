@@ -52,17 +52,18 @@ public:
     /*! 连接是否"死"(超过 WS_STALE_TIMEOUT_MS 未收到任何数据)。未连接也返回 true。 */
     bool is_stale(void) const;
 
-    /*! 注册消息处理器: 收到 TEXT 帧且 JSON 里 type == type_key 时调用 cb(payload,len,ctx) */
+    /*! 注册消息处理器: 收到 TEXT 帧且 JSON 里 type == type_key 时调用 cb(payload,len,ctx)
+     *  ★ V2(PROTOCOL.md): 所有下行类型都走这一张表 —— "asr"/"final"/"partial"/"reply" 等。
+     *    (V1 因为 partial 被 text 和 llm 共用, 额外搞了一套"按服务分流"的
+     *     set_partial_handler; V2 里 asr 只属于 text、partial 只属于 llm,
+     *     一维 type 就能区分 → 那套特判已删除。) */
     void set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx);
-
-    /*! 注册 partial 处理器(按服务区分): "text"=语音增量, "llm"=对话流式 */
-    void set_partial_handler(const char *service, ws_msg_handler_t cb, void *ctx);
 
     /*! 注册 svc_ok 回调 —— 收到服务器"服务切换完成"确认时调用。
      *  voice_session 要靠它才知道"服务器真的切好了", 才敢发 start。 */
     void set_svc_ok_callback(ws_svc_ok_cb_t cb, void *ctx);
 
-    /*! 记录当前服务(用于区分 partial 属于语音还是对话流式) */
+    /*! 记录当前服务 (V2 里仅用于诊断/未来扩展, 不再参与消息路由) */
     void set_service(const char *service) { m_service = service; }
     const char *get_service(void) const { return m_service; }
 
@@ -91,12 +92,6 @@ private:
     ws_msg_handler_t m_handlers[MAX_HANDLERS] = {};
     void *m_ctxs[MAX_HANDLERS] = {};
     int m_handler_count = 0;
-
-    /* partial 处理器(按服务): "text"→RtAsr, "llm"/"openclaw"→Llm */
-    ws_msg_handler_t m_partial_text_cb = NULL;
-    void *m_partial_text_ctx = NULL;
-    ws_msg_handler_t m_partial_chat_cb = NULL;
-    void *m_partial_chat_ctx = NULL;
 
     /* svc_ok 回调: 服务器确认切换完成 → 通知在等它的人 (voice_session) */
     ws_svc_ok_cb_t m_svc_ok_cb  = NULL;

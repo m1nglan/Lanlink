@@ -10,27 +10,31 @@
 static const char *TAG = "rtasr";
 
 /* ================================================================
- * RtAsr: 语音听写(text 服务)业务驱动
- * 依赖共享 WS 连接,通过 set_handler 注册消息处理器,由 WS 按 type 分发:
- *   partial(语音增量) → handle_partial(追加 buffer,流式显示)
- *   revise(语音修正)  → handle_revise(整体替换 buffer,修正错字)
- *   final(语音完成)   → handle_final(覆盖 buffer + 触发完成回调)
+ * RtAsr: 语音听写(text 服务)业务驱动  —— V2 协议 (见 PROTOCOL.md)
+ * 依赖共享 WS 连接, 通过 set_handler 注册消息处理器, 由 WS 按 type 分发:
+ *   asr   (完整当前句) → handle_asr  (整体替换 buffer, 流式显示)
+ *   final (完整最终句) → handle_final(整体替换 buffer + 触发完成回调)
+ *
+ * ★ V2 关键: 网关每次下发的都是【完整句】, 不是增量。
+ *   所以这里没有任何累积逻辑 —— 每次都是 strlcpy 整体替换。
+ *   好处: 丢一条 / 乱序 / 重复 都不影响最终结果。
+ *
+ *   V1 的 partial / revise 已废除:
+ *     partial → 现在只属于 llm/openclaw 服务
+ *     revise  → asr 每次都是全量(自带修正), 不再需要
  * ================================================================ */
 
-/* 累积识别文字 buffer: partial 追加, revise/final 覆盖, 每轮 start 时清零。
- * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM(文字低频访问,不影响速度) */
+/* 识别文字 buffer —— V2 下它只是"最近一条完整句"的存放处, 不做累积。
+ * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM (文字低频访问, 不影响速度) */
 EXT_RAM_BSS_ATTR static char s_result[1024];
 
 void RtAsr::attach(WS &ws)
 {
     m_ws = &ws;
-    /* 注册 text 服务的处理器:
-     *   partial → set_partial_handler("text"), 由 WS 按当前服务路由
-     *   final/revise → 普通 set_handler, 按 type 精确匹配 */
-    ws.set_partial_handler("text", &RtAsr::handle_partial, this);
+    /* 注册 text 服务的处理器 (V2: 都是普通 set_handler, 按 type 精确匹配) */
+    ws.set_handler("asr",   &RtAsr::handle_asr,   this);
     ws.set_handler("final", &RtAsr::handle_final, this);
-    ws.set_handler("revise", &RtAsr::handle_revise, this);
-    ESP_LOGI(TAG, "RtAsr 已绑定 WS");
+    ESP_LOGI(TAG, "RtAsr 已绑定 WS (V2: asr/final)");
 }
 
 void RtAsr::set_result_callback(rtasr_result_cb_t cb, void *user_ctx)
@@ -100,20 +104,20 @@ static bool extract_text(const char *payload, const char **text, cJSON **root_ou
     return true;
 }
 
-/* 语音增量: 服务器每条 partial 只含新增字,追加到累积 buffer 并流式显示 */
-void RtAsr::handle_partial(const char *payload, int len, void *ctx)
+/* 流式识别 ({"type":"asr"}): 网关发的是【完整当前句】, 整体替换后通知 UI */
+void RtAsr::handle_asr(const char *payload, int len, void *ctx)
 {
     (void)len;
     RtAsr *self = static_cast<RtAsr *>(ctx);
     const char *text = NULL;
     cJSON *root = NULL;
     if (self != nullptr && extract_text(payload, &text, &root)) {
-        self->accumulate(text, false);   /* is_final=false → 追加 */
+        self->store_and_notify(text, false);   /* false = 还没说完 */
         cJSON_Delete(root);
     }
 }
 
-/* 语音完成: 服务器发最终完整文本,覆盖 buffer 并触发完成回调 */
+/* 语音完成 ({"type":"final"}): 网关发【完整最终句】, 整体替换后通知 UI + 标记完成 */
 void RtAsr::handle_final(const char *payload, int len, void *ctx)
 {
     (void)len;
@@ -121,57 +125,31 @@ void RtAsr::handle_final(const char *payload, int len, void *ctx)
     const char *text = NULL;
     cJSON *root = NULL;
     if (self != nullptr && extract_text(payload, &text, &root)) {
-        self->accumulate(text, true);    /* is_final=true → 覆盖 */
+        self->store_and_notify(text, true);    /* true = 本轮完成 */
         cJSON_Delete(root);
     }
 }
 
-/* 语音修正: 服务器发完整当前文本,整体替换 buffer(修正错字),**不触发完成回调**
- * ★ 别把它并进 handle_final: revise 故意不发 m_cb, 否则 UI 会收到假的"说完了" */
-void RtAsr::handle_revise(const char *payload, int len, void *ctx)
-{
-    (void)len;
-    RtAsr *self = static_cast<RtAsr *>(ctx);
-    const char *text = NULL;
-    cJSON *root = NULL;
-    if (self != nullptr && extract_text(payload, &text, &root)) {
-        self->revise(text);
-        cJSON_Delete(root);
-    }
-}
-
-/* 语音修正核心: 整体替换 buffer, 不触发完成回调 */
-void RtAsr::revise(const char *text)
-{
-    strlcpy(s_result, text, sizeof(s_result));
-    ESP_LOGD(TAG, "[修正] %s", s_result);
-}
-
-/* 累积核心: 增量追加(partial)或完整覆盖(final)。
- * is_final=false: strlcat 追加; is_final=true: strlcpy 覆盖, 并触发 m_cb
+/* 核心: 整体替换 buffer + 触发回调。
  *
- * ★★ 本函数(以及 revise)是**在 WS 回调里**跑的, 而 WS 回调由 websocket_task
- *   在**持有 esp_websocket_client 的 client->lock** 的情况下调用。
+ * ★★ V2: 这里**没有累积** —— 网关每次给的都是完整句, 直接 strlcpy 覆盖。
+ *   这正是 V2 相对 V1 的核心改进: 去掉累积状态 → 丢一条/乱序/重复都不影响结果。
+ *   (V1 是 partial 追加、revise 覆盖、final 覆盖, 三条语义不同的路,
+ *    实测出过"revise 的片段把累积好的整句冲掉"这种 bug。)
+ *
+ * ★★ 本函数(以及 handle_asr/handle_final)是**在 WS 回调里**跑的, 而 WS 回调由
+ *   websocket_task 在**持有 esp_websocket_client 的 client->lock** 的情况下调用。
  *   所以这里**绝对不能有耗时/阻塞操作**。
- *
- *   原实现是 printf + fflush(stdout), 有两个后果(实测都踩到了):
- *     ① 持 client->lock 打串口 → 拖住 voice_task 的 send_audio
- *     ② 往 UART 灌大量字符 → UART 中断频繁触发 (那次 Interrupt WDT panic 的
- *        EPC1 正是 uart_hal_write_txfifo), 在 CPU0 上和 GPIO 中断一起
- *        把中断看门狗饿死
- *   而且**完全没必要**: 文字已经通过 m_cb 交给 UI 了, 再往串口打一遍是纯浪费。
- *   故降级为 ESP_LOGD (默认不输出; 要看就 esp_log_level_set("rtasr", ESP_LOG_DEBUG)) */
-void RtAsr::accumulate(const char *text, bool is_final)  //< 拼接回复: 把增量文字拼在原有文字上
+ *   (原实现有 printf + fflush(stdout): ① 持锁打串口拖住 voice_task 的 send_audio;
+ *    ② 往 UART 灌字符把 UART 中断打爆 —— 那次 Interrupt WDT panic 的 EPC1
+ *    正是 uart_hal_write_txfifo。已降级为 ESP_LOGD:
+ *    要看就 esp_log_level_set("rtasr", ESP_LOG_DEBUG)) */
+void RtAsr::store_and_notify(const char *text, bool is_final)
 {
-    if (is_final) {
-        strlcpy(s_result, text, sizeof(s_result));
-        ESP_LOGD(TAG, "[识别] %s", s_result);      /* 完整结果 */
-    } else {
-        strlcat(s_result, text, sizeof(s_result));
-        ESP_LOGD(TAG, "%s", text);                 /* 流式增量 */
-    }
+    strlcpy(s_result, text, sizeof(s_result));   /* ★ 整体替换, 不追加 */
+    ESP_LOGD(TAG, "[%s] %s", is_final ? "final" : "asr", s_result);
 
     if (m_cb != NULL) {
-        m_cb(s_result, is_final, m_cb_ctx);   /* 交给调度层(现在是 UiBridge → 投队列) */
+        m_cb(s_result, is_final, m_cb_ctx);   /* 交给调度层(UiBridge → 投 stream_q) */
     }
 }

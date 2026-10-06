@@ -30,7 +30,7 @@ void ui_Balance_screen_init(void)
 {
     ui_Balance = lv_obj_create(NULL);
     lv_obj_remove_flag(ui_Balance, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    lv_obj_set_style_bg_color(ui_Balance, lv_color_hex(0x2D2E30), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(ui_Balance, lv_color_hex(0x1E1E1F), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_Balance, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_top = lv_obj_create(ui_Balance);

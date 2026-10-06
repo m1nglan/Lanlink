@@ -66,8 +66,10 @@ public:
      *  加新载荷类型时用这个, 不必再往 UiBridge 里加方法。 */
     void post_resp_msg(const resp_msg_t &m);
 
-    /*! 投一条流式消息 (覆盖式, 永不失败)。可在 WS 回调里调用。 */
-    void post_stream(stream_kind_t kind, const char *text);
+    /*! 投一条流式消息 (覆盖式, 永不失败)。可在 WS 回调里调用。
+     *  ★ V2(PROTOCOL.md): text **永远是【完整文本】**, 消费者零累积状态。
+     *  is_final = true 表示这句是最终版, 消费者可以"定格"。 */
+    void post_stream(stream_kind_t kind, const char *text, bool is_final = false);
 
     /* ---------------- 消费者 (LVGL 侧) ---------------- */
 
@@ -94,11 +96,22 @@ private:
      *  同 on_asr_result, 跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
     static void on_svc_ok(const char *service, void *ctx);
 
+    /*! WS 回调: 网关报错 ({"type":"error","code":N})。
+     *  code 1(讯飞错误) / 3(音频超过55s) 意味着这一轮已经废了 →
+     *  投 VOICE_STOP 让采音循环收尾, 而不是继续白发音频。
+     *  同样跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
+    static void on_ws_error(const char *payload, int len, void *ctx);
+
     bool push_voice_cmd(voice_cmd_t cmd, int32_t arg); 
 
     QueueHandle_t m_voice_q    = nullptr;
     QueueHandle_t m_resp_q   = nullptr;
     QueueHandle_t m_stream_q = nullptr;
+
+    /*! 本轮语音会话是否在进行中 (由 post_resp_status 的 STARTED/ENDED/ABORTED 维护)。
+     *  只给 on_ws_error 用: 网关报错时, 没在录音就不要往 voice_q 里塞 STOP
+     *  (否则那个 STOP 会残留到下一次会话开头, 被 voice_q_drain 当成"用户松手"而取消)。 */
+    volatile bool m_asr_active = false;
 
     RtAsr m_asr;   /*!< 全局常驻实例 (坑#4) */
 };

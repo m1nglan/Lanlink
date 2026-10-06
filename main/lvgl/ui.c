@@ -19,6 +19,7 @@ lv_anim_t * loading_Animation(lv_obj_t * TargetObject, int delay);
 lv_anim_t * longingext_Animation(lv_obj_t * TargetObject, int delay);
 lv_anim_t * wind_Animation(lv_obj_t * TargetObject, int delay);
 lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay);
+lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay);
 
 // EVENTS
 lv_obj_t * ui____initial_actions0;
@@ -464,6 +465,30 @@ lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay)
 
     return out_anim;
 }
+lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay)
+{
+    lv_anim_t * out_anim;
+    ui_anim_user_data_t * PropertyAnimation_0_user_data = lv_malloc(sizeof(ui_anim_user_data_t));
+    PropertyAnimation_0_user_data->target = TargetObject;
+    PropertyAnimation_0_user_data->val = -1;
+    lv_anim_t PropertyAnimation_0;
+    lv_anim_init(&PropertyAnimation_0);
+    lv_anim_set_duration(&PropertyAnimation_0, 0);
+    lv_anim_set_user_data(&PropertyAnimation_0, PropertyAnimation_0_user_data);
+    lv_anim_set_custom_exec_cb(&PropertyAnimation_0, _ui_anim_callback_set_width);
+    lv_anim_set_values(&PropertyAnimation_0, 180, 0);
+    lv_anim_set_path_cb(&PropertyAnimation_0, lv_anim_path_linear);
+    lv_anim_set_delay(&PropertyAnimation_0, delay + 0);
+    lv_anim_set_deleted_cb(&PropertyAnimation_0, _ui_anim_callback_free_user_data);
+    lv_anim_set_reverse_duration(&PropertyAnimation_0, 0);
+    lv_anim_set_reverse_delay(&PropertyAnimation_0, 0);
+    lv_anim_set_repeat_count(&PropertyAnimation_0, 0);
+    lv_anim_set_repeat_delay(&PropertyAnimation_0, 0);
+    lv_anim_set_early_apply(&PropertyAnimation_0, false);
+    out_anim = lv_anim_start(&PropertyAnimation_0);
+
+    return out_anim;
+}
 
 ///////////////////// FUNCTIONS ////////////////////
 
@@ -479,9 +504,8 @@ void ui_init(void)
     ui_main_screen_init();
     ui_Balance_screen_init();
     ui_Server_screen_init();
-    ui_chat_screen_init();
     ui____initial_actions0 = lv_obj_create(NULL);
-    lv_disp_load_scr(ui_main);
+    lv_disp_load_scr(ui_home);
 }
 
 void ui_destroy(void)
@@ -490,7 +514,6 @@ void ui_destroy(void)
     ui_main_screen_destroy();
     ui_Balance_screen_destroy();
     ui_Server_screen_destroy();
-    ui_chat_screen_destroy();
 }
 
 void ui_relocalize(void)
@@ -499,5 +522,4 @@ void ui_relocalize(void)
     ui_main_screen_relocalize();
     ui_Balance_screen_relocalize();
     ui_Server_screen_relocalize();
-    ui_chat_screen_relocalize();
 }

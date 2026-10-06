@@ -144,17 +144,6 @@ void WS::set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx)
     ESP_LOGI(TAG, "注册 handler: type=%s", type_key);
 }
 
-void WS::set_partial_handler(const char *service, ws_msg_handler_t cb, void *ctx)
-{
-    if (strcmp(service, "text") == 0) {
-        m_partial_text_cb = cb;
-        m_partial_text_ctx = ctx;
-    } else {
-        m_partial_chat_cb = cb;
-        m_partial_chat_ctx = ctx;
-    }
-}
-
 void WS::set_svc_ok_callback(ws_svc_ok_cb_t cb, void *ctx)
 {
     m_svc_ok_cb  = cb;
@@ -290,15 +279,21 @@ void WS::handle_data(const char *payload, int len)
             else if (c == '}') { brace--; }
 
             if (brace == 0 && i > start) {
-                /* 找到一条完整 JSON: [start, i] */
-                char msg[1024];
-                int msg_len = i - start + 1;
-                if (msg_len >= (int)sizeof(msg)) {
-                    msg_len = sizeof(msg) - 1;
-                }
-                memcpy(msg, m_rx_buf + start, msg_len);
-                msg[msg_len] = '\0';
-                dispatch_msg(msg, msg_len);
+                /* 找到一条完整 JSON: [start, i]
+                 *
+                 * ★★ 就地分发, **不再拷到 1KB 的栈缓冲里**。原因两条:
+                 *   ① 长度上限: V2 下 LLM 的 {"type":"reply"} 可以带 2KB 正文,
+                 *      JSON 会超过 1KB 拷贝缓冲 → 一截断 cJSON 就解析失败
+                 *      → 整条回复被静默丢掉。就地分发没有长度上限。
+                 *   ② 栈压力: websocket_task 栈只有 4K, 而回调链里
+                 *      post_stream 还要放 2KB 的 stream_msg_t —— 省掉这 1KB 很值。
+                 *
+                 * cJSON_Parse 内部会把字符串复制走, 所以"临时把下一个字节改成
+                 * '\0' → 分发 → 改回来"是安全的。 */
+                char saved = m_rx_buf[i + 1];   /* i+1 <= m_rx_len, 而 m_rx_buf[m_rx_len] 就是 '\0' */
+                m_rx_buf[i + 1] = '\0';
+                dispatch_msg(m_rx_buf + start, i - start + 1);
+                m_rx_buf[i + 1] = saved;
                 start = i + 1;
                 break;
             }
@@ -341,8 +336,11 @@ void WS::dispatch_msg(const char *msg, int len)
 
     /* 通用帧由 WS 自己处理 */
     if (strcmp(type, "error") == 0) {
+        /* ★ 这里【故意不 return】—— 继续往下走查表分发。
+         *   原因: 只打日志的话, 上层(voice)不知道"服务器已经放弃这一轮了",
+         *   会继续白发音频。UiBridge 注册了 "error" 处理器, 由它决定怎么收尾。
+         *   (type 是 "error", 不会命中下面的 svc_ok/pong, 自然落到查表。) */
         ESP_LOGE(TAG, "网关错误: %s", msg);
-        return;
     }
     if (strcmp(type, "svc_ok") == 0) {
         ESP_LOGI(TAG, "服务切换成功: %s", msg);
@@ -359,16 +357,11 @@ void WS::dispatch_msg(const char *msg, int len)
         return;
     }
 
-    /* partial 按当前服务分流: text=语音增量, llm/openclaw=对话流式 */
-    if (strcmp(type, "partial") == 0) {
-        bool is_chat = (strcmp(m_service, "llm") == 0) || (strcmp(m_service, "openclaw") == 0);
-        ws_msg_handler_t h = is_chat ? m_partial_chat_cb : m_partial_text_cb;
-        void *hctx = is_chat ? m_partial_chat_ctx : m_partial_text_ctx;
-        if (h != NULL) {
-            h(msg, len, hctx);
-        }
-        return;
-    }
+    /* ★ V2(PROTOCOL.md): 所有业务下行统一走下面这张表 ——
+     *   "asr" / "final"     → RtAsr 注册的处理器
+     *   "partial" / "reply" → Llm 注册的处理器 (未接入时就是未注册 → 丢弃)
+     *   V1 因为 partial 被 text 和 llm 共用, 这里有一整套"按 m_service 分流"的特判;
+     *   V2 里 asr 只属于 text、partial 只属于 llm, 一维 type 就能区分 → 特判已删。 */
 
     /* 查表分发 */
     for (int i = 0; i < m_handler_count; i++) {

@@ -33,18 +33,24 @@ typedef enum {
 #define LLM_REPLY_TIMEOUT_MS (120000)   /*!< 等 agent 回复超时(工具调用空窗可达几十秒) */
 
 /* ================================================================
- * 将来接线的位置 (别现在写):
+ * 将来接线的位置 (别现在写) —— ★ 已按 V2 协议(PROTOCOL.md)更新
  *
- * ① 收到 RESP_ASR_FINAL → 若当前服务是 LLM 且阶段机 IDLE, 则进入 LLM_SWITCHING
+ * ① 收到 STREAM_ASR 且 is_final=1 → 若当前服务是 LLM 且阶段机 IDLE,
+ *    则进入 LLM_SWITCHING
  * ② LLM_SWITCHING 等 LLM_SWITCH_WAIT_MS 后:
- *        WS::get().set_service(LLM_SVC_LLM);          // ★ 决定 partial 往哪路由
- *        llm.switch_service(LLM_SVC_LLM, ...);        // ★ 通知服务器
+ *        WS::get().set_service(LLM_SVC_LLM);          // 本地记录(仅诊断用)
+ *        llm.switch_service(LLM_SVC_LLM, ...);        // ★ 通知服务器(等 svc_ok)
  *        llm.chat(text, ...);
- * ③ 收到 {"type":"reply"} → Llm::handle_reply → 投 RESP_LLM_FINAL
- *    (流式增量走 {"type":"partial"}, 由 WS::m_service 路由到 m_partial_chat_cb)
+ * ③ 收到 {"type":"partial"} → Llm::handle_partial
+ *        驱动侧已累积 → 回调给出【完整回复】 → 投 STREAM_LLM(is_final=false)
+ *    收到 {"type":"reply"}   → Llm::handle_reply
+ *        → 投 STREAM_LLM(is_final=true)  ← 本轮完成
  * ④ 回复结束/超时 → 切回 text:
  *        WS::get().set_service(LLM_SVC_TEXT);
  *        llm.switch_service(LLM_SVC_TEXT, ...);
  *
- * ⚠️ 每一步的 set_service + switch_service 必须**成对**, 否则 partial 静默丢失。
+ * ★ V2 说明: partial 现在**只属于 llm/openclaw**(text 服务改用 "asr"),
+ *   所以 WS 侧不再需要"按 m_service 分流"那套特判 —— 一维 type 就能区分。
+ *   set_service / switch_service 仍要成对, 但理由变成了"保持本地视图与
+ *   服务器一致, 便于诊断", 不再是"否则 partial 会路由错"。
  * ================================================================ */

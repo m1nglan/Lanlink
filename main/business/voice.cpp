@@ -23,6 +23,23 @@ static const char *TAG = "voice";
                                          *   局域网往返通常 <50ms; 300ms 是原来盲等的猜测值,
                                          *   若日志出现"等 svc_ok 超时"再调大 */
 
+/*! ★ 单轮录音时长上限 —— 主动收尾, 不等网关报错。
+ *
+ *  网关协议 (APIserver.md §2) 明写: "单轮最长 55 秒", 超出会回
+ *  {"type":"error","code":3,"message":"音频超过55s"}。
+ *
+ *  为什么要在【我们这边】也设一个:
+ *    - 到点后网关已经停止识别了, 我们再发音频全是白费(还占 WiFi 带宽)
+ *    - 网关的计数起点是它收到 start 的时刻, 可能比我们早几十 ms →
+ *      卡在 55000 有踩线风险
+ *  所以取 50 秒, 留 5 秒余量。
+ *
+ *  ★ 到点后走的是【正常收尾路径】(mic.stop + asr.end + ENDED), 不是 abort ——
+ *    这样服务器那边的 final 还能正常回来, 用户拿到的是完整识别结果。
+ *  ★ 兜底: 万一网关比我们早判超时, 它的 {"type":"error"} 会让
+ *    UiBridge::on_ws_error 投一个 VOICE_STOP, 采音循环同样会收尾(见 ui_bridge.cpp)。 */
+#define VOICE_MAX_RECORD_MS  (50000)
+
 /* ---------------- 音量标定 (为"服务器无响应"判定做准备) ----------------
  * 思路: "收不到识别结果"有两种原因, 现象一样但含义相反 ——
  *         ① 用户没说话       → 服务器本来就不会回字   ← 正常, 不能判死
@@ -218,6 +235,7 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
     bool     aborted   = false;
     uint32_t frames    = 0;   //< 成功发送的帧数
     uint32_t read_fail = 0;   //< 读失败被 continue 跳过的帧数 (= 被丢掉的音频)
+    uint32_t t_rec     = now_ms();   //< 采音起点 (算单轮时长用)
 
 #if VOICE_LEVEL_LOG_MS > 0
     uint32_t t_level     = now_ms();
@@ -238,6 +256,15 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
         /* ★ 边界②: 不管读没读到, 都先看 STOP / 断线 */
         if (xQueueReceive(voice_q, &m, 0) == pdTRUE && m.cmd == VOICE_STOP) {
             break;                              /* 用户松开 → 正常结束 */
+        }
+        /* ★ 边界③: 单轮时长上限 (网关规定最长 55 秒, 我们 50 秒主动收尾)。
+         *   走【正常收尾】而不是 abort: 后面的 mic.stop + asr.end 照常执行,
+         *   服务器的 final 还能回来, 用户拿到的仍是完整识别结果。
+         *   (不是 aborted —— 只是"录满了", 不是出错。) */
+        if (now_ms() - t_rec >= VOICE_MAX_RECORD_MS) {
+            ESP_LOGW(TAG, "已达单轮上限 %u 秒, 自动收尾 (网关规定最长 55 秒)",
+                     (unsigned)(VOICE_MAX_RECORD_MS / 1000));
+            break;
         }
         if (!ws.is_connected()) {
             ESP_LOGW(TAG, "采音期间连接断开, 会话中止");

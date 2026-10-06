@@ -29,9 +29,11 @@ void ui_event_home(lv_event_t * e)
     }
     if(event_code == LV_EVENT_KEY &&  lv_event_get_key(e) == LV_KEY_LEFT) {
         _ui_screen_change(&ui_chat, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT, 500, 0, &ui_chat_screen_init);
+        panelclose_Animation(ui_weatherpart, 0);
     }
     if(event_code == LV_EVENT_KEY &&  lv_event_get_key(e) == LV_KEY_RIGHT) {
         _ui_screen_change(&ui_Server, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, 500, 0, &ui_Server_screen_init);
+        panelclose_Animation(ui_weatherpart, 0);
     }
 }
 
@@ -41,7 +43,7 @@ void ui_home_screen_init(void)
 {
     ui_home = lv_obj_create(NULL);
     lv_obj_remove_flag(ui_home, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    lv_obj_set_style_bg_color(ui_home, lv_color_hex(0x292C31), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(ui_home, lv_color_hex(0x1E1E1F), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_home, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_time1 = lv_label_create(ui_home);

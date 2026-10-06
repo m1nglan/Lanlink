@@ -43,34 +43,61 @@ typedef struct {
 
 
 /* ============ 流式通道 stream_q (深度 1, 覆盖式 xQueueOverwrite) ============
- * 语义: 只留最新一句。生产者**永不阻塞、永不失败**; 消费者"非空才刷"。 */
+ * 语义: 只留最新一句。生产者**永不阻塞、永不失败**; 消费者"非空才刷"。
+ *
+ * ★★ V2 协议 (见 PROTOCOL.md): 这里装的**永远是【完整文本】**, 不是增量。
+ *   - ASR: 网关每次发完整当前句 ({"type":"asr"}) → 板子直接替换
+ *   - LLM: 网关发增量, 但**累积在 Llm 驱动里做完** → 送进队列的已是完整回复
+ *   所以消费者【零累积状态】: 收到什么就 lv_label_set_text 什么。
+ *
+ *   ⚠️ 这就是"LLM 的累积必须在驱动侧做"的原因: 本队列深度 1 覆盖式,
+ *      若把增量放进来等 UI 侧累积 → 消费者慢一点中间的增量就被覆盖丢掉了。 */
 
 typedef enum {
-    STREAM_ASR_PARTIAL = 0,   /*!< 语音识别增量 (text 服务) */
-    STREAM_LLM_PARTIAL,       /*!< LLM 回复增量 (预留) */
+    STREAM_ASR = 0,     /*!< 语音识别: 完整当前句 */
+    STREAM_LLM,         /*!< 大模型: 完整回复 (驱动侧已累积好) */
 } stream_kind_t;
 
-/*! 一句话的容量。生产者侧已由 RtAsr 拼成完整句, 这里按句长 strlcpy(可截断) */
-#define BUS_TEXT_LEN 512
+/*! 长文本容量 —— **只用在 stream_q 上** (深度 1, 覆盖式, 只占一份)。
+ *  所以开大很便宜: 512 → 2048 只多花 1.5KB 总内存。 */
+#define BUS_TEXT_LEN 2048
+
+/*! 短文本容量 —— resp_q 用 (深 16)。
+ *
+ *  ★★ 这个值是 64, 不是 512 —— 别照 V1 的老尺寸改回去。
+ *     历史: V1 时代 RESP_ASR_FINAL 走 resp_q, 完整句子塞在 u.text 里 → 需要 512。
+ *           V2 之后识别结果/LLM 回复全归 stream_q (深 1, BUS_TEXT_LEN=2048),
+ *           resp_q 退化成**纯状态通道** → u.text 只剩"带个数值的短提示"用途。
+ *           而 512 × RESP_Q_LEN(16) = 8384 字节, 占了队列总内存的 80%,
+ *           其中 99% 是空气。
+ *
+ *  ★ 64 字节 ≈ 21 个汉字, 够放 "服务切换超时" / "音频超过 55 秒上限" 这类提示。
+ *    改小之后 resp_msg_t 从 524 → 76 字节, resp_q 从 8384 → 1216 字节。
+ *
+ *  ★ 真需要放长文本时, 走 stream_q, **不要把这个值调大** ——
+ *    resp_q 深 16, 这里每 +1 字节就是 ×16。 */
+#define BUS_TEXT_LEN_SHORT 64
 
 typedef struct {
     stream_kind_t kind;
+    bool          is_final;   /*!< ★ true = 这句是最终版, UI 可以"定格"。
+                                *   把"流式"和"完成"合并到同一条消息里,
+                                *   于是 resp_q 不再需要 RESP_ASR_FINAL/RESP_LLM_FINAL。 */
     char          text[BUS_TEXT_LEN];
-} stream_msg_t;
+} stream_msg_t;               /*!< 约 2056 字节 */
 
 
 /* ================= 控制通道 resp_q (普通队列, 深度 RESP_Q_LEN) =================
- * 语义: 可靠, 逐条处理, 每条都不能丢。 */
+ * 语义: 可靠, 逐条处理, 每条都不能丢。
+ * ★ 只走【状态】和【短提示】—— 长文本一律走 stream_q (否则深度 16 会被吃掉)。 */
 
 typedef enum {    //< 状态 键
-    RESP_ASR_FINAL = 0,   /*!< 语音最终结果 */
-    RESP_ASR_STATUS,      /*!< 会话状态 (开始/结束/中止) */
-    RESP_WS_STATUS,       /*!< 连接状态 (连上/断开/重连中) */
-    RESP_LLM_FINAL,       /*!< 预留 */
-    RESP_STATUS,          /*!< 通用提示 */
+    RESP_WS_STATUS = 0,   /*!< 连接状态 (连上/断开/重连中) → u.sta */
+    RESP_ASR_STATUS,      /*!< 会话状态 (开始/结束/中止)   → u.sta */
+    RESP_STATUS,          /*!< 通用短提示 (≤21 汉字)     → u.text */
 } resp_kind_t;
 
-typedef enum {          // <向resq_q投的状态信息 给voice用
+typedef enum {          // <向resq_q投的状态信息
     CONNECTED = 0,
     DISCONNECTED,
     RECONNECTING,
@@ -86,17 +113,17 @@ typedef struct {
 
     /*! 载荷 —— 同一时刻**只有一个成员有效**, 由 kind 指示。
      *  ★ 成员必须是"平凡类型"(纯 C 值), 且**不得含指针**:
-     *    队列靠 memcpy 搬字节, 它只保护这 512 字节本身,
+     *    队列靠 memcpy 搬字节, 它只保护这块内存本身,
      *    指针指向的内存不受队列保护 (会悬空/被改写)。
-     *  ★ 新增类型只要 ≤ BUS_TEXT_LEN, 就往这里加一项 ——
-     *    队列深度、UiBridge、内存占用全都不用动。 */
+     *  ★ 这里只放【短】内容 (≤BUS_TEXT_LEN_SHORT=64): resp_q 深 16, 放长文本会吃掉 16 倍内存。
+     *    长文本(识别结果/LLM 回复)一律走 stream_q (深 1, BUS_TEXT_LEN=2048), 见 PROTOCOL.md。 */
     union {
-        char    text[BUS_TEXT_LEN];   /*!< 文本类 (512 字节) */
-        int32_t i32;                  /*!< 32bit 数值类 (余额/百分比/计数) */
-        float   f32;                  /*!< 单精度浮点类 */
-        status_kind_t sta;
+        char    text[BUS_TEXT_LEN_SHORT];  /*!< 文本类: 带数值的短提示 (≤21 汉字) */
+        int32_t i32;                       /*!< 32bit 数值类 (余额/百分比/计数) */
+        float   f32;                       /*!< 单精度浮点类 */
+        status_kind_t sta;                 /*!< 状态枚举 —— 目前唯一在用的成员 */
     } u;
-} resp_msg_t;             /*!< 524 字节 —— union 取最大成员(512), 与原 text[512] 等大 */
+} resp_msg_t;             /*!< 76 字节 (旧: 512 时代的 524 字节) */
 
 
 /* ================= 队列深度 ================= */
@@ -105,13 +132,14 @@ typedef struct {
 #define STREAM_Q_LEN (1)      /*!< 覆盖式队列必须是 1, 否则 xQueueOverwrite 会断言 */
 
 /* ================================================================
- * 设计理由: 为什么 resp 和 stream 要分两条队列
+ * 设计理由: 为什么 resp 和 stream 要分两条队列 (V2 协议)
  *
- * partial 是高频流式(可能 50Hz), 而 UI 每 50ms 才刷一次。
+ * stream_q 装【完整文本】(可能 10Hz), 而 UI 每 ~137ms 才刷一次。
  * 如果都用普通队列, 会同时踩两个坑:
  *   ① 生产者(websocket_task) 正持着 esp_websocket_client 的 client->lock,
- *      **绝对不能阻塞** → 队列满就只能丢 → 有几率把 final 丢掉;
- *   ② 逐条消费全是无用功 —— 第 N 条还没刷就被第 N+1 条取代了。
+ *      **绝对不能阻塞** → 队列满就只能丢 → final 有几率被丢;
+ *   ② 逐条消费全是无用功 —— 第 N 条还没刷就被第 N+1 条取代了
+ *      (V2 里每条都是全量, 前面几条本来就该被取代)。
  *
  * 所以流式走单独的"深度 1 覆盖队列":
  *   生产者 xQueueOverwrite → 永不阻塞、永不失败, 只留最新那句
@@ -119,4 +147,8 @@ typedef struct {
  *
  * 这天然实现了"变化检测"(不必自己写 flag=1/刷完=0), 且**无竞态**:
  * FreeRTOS 队列内部临界区保证文本随消息原子拷贝、不会撕裂。
+ *
+ * ★ 深度 1 的另一个好处: 长文本只占【一份】内存 →
+ *   BUS_TEXT_LEN 才敢开到 2048 (512 时只多花 1.5KB 总内存)。
+ *   如果长文本走深度 16 的 resp_q, 那就是 16 × 2048 = 32KB, 不可接受。
  * ================================================================ */

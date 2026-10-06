@@ -43,10 +43,10 @@ images/ui_img_wind_4_png.c
 images/ui_img_wind_5_png.c
 images/ui_img_wind_6_png.c
 fonts/ui_font_balance22.c
+fonts/ui_font_ch14.c
 fonts/ui_font_date22.c
 fonts/ui_font_icon18.c
 fonts/ui_font_time40.c
 fonts/ui_font_time64.c
 fonts/ui_font_updown10.c
 fonts/ui_font_weather18.c
-fonts/ui_font_ch14.c
