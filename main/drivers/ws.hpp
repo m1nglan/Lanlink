@@ -14,9 +14,9 @@
 #define WS_CONNECT_TIMEOUT_MS (15000)      /*!< 连接超时 */
 #define WS_SEND_TIMEOUT_MS    (1000)       /*!< 发送超时 */
 #define WS_PING_INTERVAL_SEC  (20)         /*!< 板子主动 PING 保活间隔 */
-#define WS_STALE_TIMEOUT_MS   (130000)     /*!< 超过该时长未收到任何数据→判定死连接,重连。
-                                            OpenClaw 工具调用空窗可达几十秒,阈值须大于服务器120s ping,
-                                            避免 LLM 空窗期误判断连。 */
+#define WS_STALE_TIMEOUT_MS   (130000)     /*!< 超时未收到任何数据 → 判死连接, 重连。
+                                            ★ 阈值须大于服务器的 120s 协议 ping
+                                            (LLM 工具调用空窗可达几十秒, 不能误判) */
 
 /* 消息处理器: 收到 TEXT 帧且 type 匹配时调用
  * payload: null 终止的完整 JSON 字符串(WS 已补 \0); len: 原始长度; ctx: set_handler 传入 */
@@ -28,15 +28,15 @@ typedef void (*ws_msg_handler_t)(const char *payload, int len, void *ctx);
 typedef void (*ws_svc_ok_cb_t)(const char *service, void *ctx);
 
 /*!
- * 统一服务网关 WebSocket 连接驱动(单例,一条长连接,应用层按 type 分发)
+ * 统一服务网关 WebSocket 连接驱动 (单例, 一条长连接, 应用层按 type 分发)
  *
- * 服务器: ws://HOST:PORT/?token=SERVER_TOKEN
- * 消息通过 {"type":"svc","service":"..."} 在 text/llm/openclaw 间切换。
- *
- * 使用示例:
- *   WS::get().init();
- *   WS::get().set_handler("partial", my_partial_cb, NULL);
- *   WS::get().send_text("{\"type\":\"start\"}", 1000);
+ *   ws://HOST:PORT/?token=SERVER_TOKEN;  用 {"type":"svc","service":...} 在
+ *   text / llm / openclaw / usage / weather / echo 间切换。
+ * ★ init / deinit / 重连 **由 ws_keeper 独占负责** (ws_keeper.cpp:69), 业务方不要自己调。
+ *   业务只做三件事:
+ *       WS::get().set_handler("asr", my_asr_cb, NULL);       // 注册下行类型
+ *       WS::get().set_svc_ok_callback(cb, NULL);             // 切服务确认
+ *       WS::get().send_text("{\"type\":\"start\"}", 1000);   // 上行
  */
 class WS {
 public:
@@ -53,10 +53,9 @@ public:
     bool is_stale(void) const;
 
     /*! 注册消息处理器: 收到 TEXT 帧且 JSON 里 type == type_key 时调用 cb(payload,len,ctx)
-     *  ★ V2(PROTOCOL.md): 所有下行类型都走这一张表 —— "asr"/"final"/"partial"/"reply" 等。
-     *    (V1 因为 partial 被 text 和 llm 共用, 额外搞了一套"按服务分流"的
-     *     set_partial_handler; V2 里 asr 只属于 text、partial 只属于 llm,
-     *     一维 type 就能区分 → 那套特判已删除。) */
+     *  ★ V2: 所有下行类型都走这一张表 —— asr / final / partial / reply / error ...
+     *    (V1 因 partial 被 text 和 llm 共用而另有一套"按 m_service 分流"的
+     *     set_partial_handler, V2 里一维 type 就能区分 → 已删除。) */
     void set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx);
 
     /*! 注册 svc_ok 回调 —— 收到服务器"服务切换完成"确认时调用。
@@ -102,9 +101,8 @@ private:
     uint32_t m_last_rx_ms = 0;   /*!< 最后收到数据的时间(ms,esp_timer) */
     const char *m_service = "text";  /*!< 当前服务(text/llm/openclaw/echo) */
 
-    /* 接收累积缓冲: 处理 websocket 粘包/分帧。
-     * 段属性(EXT_RAM_BSS_ATTR)只允许静态存储期变量,故声明为 static 成员,
-     * 存储定义在 ws.cpp(WS 是单例,仅一份)。8KB 防粘包数据超长溢出。 */
+    /* 接收累积缓冲(处理 websocket 粘包/分帧): 段属性 EXT_RAM_BSS_ATTR 只允许
+     * 静态存储期变量, 故声明为 static 成员。定义在 ws.cpp(WS 是单例, 仅一份)。 */
     static const int RX_BUF_SIZE = 8192;
     static char m_rx_buf[RX_BUF_SIZE];
     int m_rx_len = 0;

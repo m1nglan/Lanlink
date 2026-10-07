@@ -7,31 +7,21 @@
 #include "driver/gpio.h"
 
 /* ================================================================
- * 按键边沿驱动 (GPIO 中断 + esp_timer 软件消抖, 事件回调式, 取代轮询)
+ * [链] GPIO双边沿中断 → button_edge_isr → (一次消抖 timer) button_edge_timer_cb
+ *      → 【本驱动回调】 → on_button_edge(main.cpp)
  *
- * 原理:
- *   按下/松开/抖动都触发 ANYEDGE 中断 → ISR 只重启一个 ~15ms 一次性 esp_timer
- *   → 电平稳定 15ms 无新中断后, timer 回调读稳定电平, 与上次上报比较
- *   → 变了才触发对应"按下/释放"回调 (天然支持 push-to-talk)
+ * 事件回调式按键驱动(取代轮询): ANYEDGE 中断只推迟一个消抖 timer, 电平稳定后
+ * 回调才读电平、与上次上报比较, 变了才上报 (天然支持 push-to-talk)。
+ * 零任务 / 零轮询 / 不依赖 UI 存活; 回调跑在 esp_timer 任务上下文(普通任务,
+ * 可安全投队列); 支持多按键(各自独立 timer)、按下与释放双沿。
  *
- * 特性:
- *   - 零轮询: 不占任务, 不依赖任何 UI 存活
- *   - 回调运行在 esp_timer 任务上下文 (普通任务, 可安全调 xQueueSend 等)
- *   - 支持多按键 (各自独立 timer), 按下/释放双沿
- *
- * 使用:
- *   button_edge_init(GPIO_NUM_10, 0, on_btn, ctx);   // active_level=0 按下为低
- *   ...
- *   static void on_btn(void *ctx, gpio_num_t pin, bool pressed) { ... }
+ * 用法: button_edge_init(BTN_REC_PIN, 0, on_btn, ctx);   // 实际引脚见 main.cpp
  * ================================================================ */
 
 /* ------------------ 参数 ------------------ */
 /*! 稳定多久算消抖完成 (抖动期不断被中断重启推迟)。
- *  ★ 取值参照: 旧轮询驱动 button.hpp 用 BTN_DEBOUNCE_MS(10) x BTN_DEBOUNCE_N(5)
- *    = **50ms 连续稳定** 才算一次有效沿, 那是本硬件上验证过不抖的值。
- *    阶段 1 初版只给 15ms → 一次按下会打出多条 按下/释放 (机械抖动有 >15ms 的间歇)。
- *  取值权衡: 越大越不抖, 但"按下/释放"上报也越晚。
- *    按下延迟 ≈ 本值; 松开→voice_stop 最坏 ≈ 本值 + 音频帧边界 40ms (阶段 3 用) */
+ *  50ms 是本硬件验证过不抖的值(旧轮询驱动 10ms×5 的等价物); 初版给 15ms 时
+ *  一次按下会打出多条 按下/释放。代价: 按下延迟 ≈ 本值; 详见 MD/HANDOFF.md §5.3 */
 #define BTN_EDGE_DEBOUNCE_MS   (50)
 #define BTN_EDGE_MAX_BUTTONS   (4)    /*!< 最多支持几个按键 */
 
@@ -48,12 +38,7 @@ typedef void (*btn_edge_cb_t)(void *ctx, gpio_num_t pin, bool pressed);
  */
 esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, void *ctx);
 
-/*!
- * 累计进入 GPIO 边沿 ISR 的次数 (诊断用)。
- *
- * ★ 用途: 判断"按键线是不是在噪声里反复翻转"。正常按一次 = 几次~几十次;
- *   若是几百/几千地涨 → 引脚接触不良/悬空 (面包板上很常见), 会引发
- *   ISR 风暴 → 中断看门狗 panic。
- *   在 voice.cpp 的每秒 level 日志里会打一次, 便于观察速率。
- */
+/*! 累计进入 GPIO 边沿 ISR 的次数 (诊断用)。
+ *  ★ 判"按键线是不是在噪声里翻转": 正常按一次 = 几次~几十次; 几百/几千地涨 =
+ *    引脚接触不良/悬空 → ISR 风暴 → 中断看门狗 panic。voice.cpp 每秒日志会打。 */
 uint32_t button_edge_isr_count(void);

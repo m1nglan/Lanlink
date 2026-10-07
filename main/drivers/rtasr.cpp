@@ -10,18 +10,12 @@
 static const char *TAG = "rtasr";
 
 /* ================================================================
- * RtAsr: 语音听写(text 服务)业务驱动  —— V2 协议 (见 PROTOCOL.md)
- * 依赖共享 WS 连接, 通过 set_handler 注册消息处理器, 由 WS 按 type 分发:
- *   asr   (完整当前句) → handle_asr  (整体替换 buffer, 流式显示)
- *   final (完整最终句) → handle_final(整体替换 buffer + 触发完成回调)
+ * [链] websocket_task → WS::handle_data → WS::dispatch_msg
+ *      → 【handle_asr / handle_final】 → store_and_notify
+ *        → [回调] UiBridge::on_asr_result → post_stream → stream_q → 气泡
  *
- * ★ V2 关键: 网关每次下发的都是【完整句】, 不是增量。
- *   所以这里没有任何累积逻辑 —— 每次都是 strlcpy 整体替换。
- *   好处: 丢一条 / 乱序 / 重复 都不影响最终结果。
- *
- *   V1 的 partial / revise 已废除:
- *     partial → 现在只属于 llm/openclaw 服务
- *     revise  → asr 每次都是全量(自带修正), 不再需要
+ * 注册 "asr"/"final" 两个 type, 都由 WS 查表分发(不再有"按服务分流")。
+ * V2 协议细节详见 MD/PROTOCOL.md。
  * ================================================================ */
 
 /* 识别文字 buffer —— V2 下它只是"最近一条完整句"的存放处, 不做累积。
@@ -82,12 +76,9 @@ esp_err_t RtAsr::end(uint32_t timeout_ms)
     return m_ws->send_text("{\"type\":\"end\"}", timeout_ms);
 }
 
-/* ============ 三个 type 的公共前半段 ============
- * partial / final / revise 三个回调**只差"取到 text 之后干什么"**这一行,
- * 前面的 cJSON 解析样板完全一样 —— 抽到这里, 免得改一处漏两处。
- *
- * 成功返回 true, 并把 root 通过 root_out 交回调用方去 cJSON_Delete;
- * *text 指向 root 内部的内存, 所以调用方**必须先用 text、再 delete root**。 */
+/* asr / final 两个回调共用的前半段: 解析 JSON + 取 "text" 字段。
+ * 成功返回 true 并把 root 交回调用方 delete; *text 指向 root 内部内存
+ * → 调用方**必须先用 text、再 delete root**。 */
 static bool extract_text(const char *payload, const char **text, cJSON **root_out)
 {
     cJSON *root = cJSON_Parse(payload);
@@ -130,20 +121,12 @@ void RtAsr::handle_final(const char *payload, int len, void *ctx)
     }
 }
 
-/* 核心: 整体替换 buffer + 触发回调。
+/* 核心: 整体替换 buffer + 触发回调。 [链同]
  *
- * ★★ V2: 这里**没有累积** —— 网关每次给的都是完整句, 直接 strlcpy 覆盖。
- *   这正是 V2 相对 V1 的核心改进: 去掉累积状态 → 丢一条/乱序/重复都不影响结果。
- *   (V1 是 partial 追加、revise 覆盖、final 覆盖, 三条语义不同的路,
- *    实测出过"revise 的片段把累积好的整句冲掉"这种 bug。)
- *
- * ★★ 本函数(以及 handle_asr/handle_final)是**在 WS 回调里**跑的, 而 WS 回调由
- *   websocket_task 在**持有 esp_websocket_client 的 client->lock** 的情况下调用。
- *   所以这里**绝对不能有耗时/阻塞操作**。
- *   (原实现有 printf + fflush(stdout): ① 持锁打串口拖住 voice_task 的 send_audio;
- *    ② 往 UART 灌字符把 UART 中断打爆 —— 那次 Interrupt WDT panic 的 EPC1
- *    正是 uart_hal_write_txfifo。已降级为 ESP_LOGD:
- *    要看就 esp_log_level_set("rtasr", ESP_LOG_DEBUG)) */
+ * ★★ V2: 这里【没有累积】—— 网关每次给的都是完整句, 直接 strlcpy 覆盖。
+ * ★★ 本函数在 WS 回调里跑, 而回调由 websocket_task **持着 client->lock** 调用
+ *   → 绝对不能有耗时/阻塞操作。原版有 printf+fflush: 会拖住 send_audio, 并把
+ *   UART 中断打爆(Interrupt WDT panic)。详见 MD/HANDOFF.md §6-I */
 void RtAsr::store_and_notify(const char *text, bool is_final)
 {
     strlcpy(s_result, text, sizeof(s_result));   /* ★ 整体替换, 不追加 */

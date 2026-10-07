@@ -22,6 +22,9 @@ WS& WS::get(void)
     return instance;
 }
 
+/* [链] ws_keeper_task → 【WS::init】 → (阻塞等握手, 最长 WS_CONNECT_TIMEOUT_MS)
+ *      → 收发就绪。重连也由 ws_keeper 走这里。
+ * ★ 组件配置关掉了自动重连和 PONG 超时(下两行), 所以保活/重连必须上层负责。 */
 esp_err_t WS::init(void)
 {
     if (m_ws != NULL) {
@@ -36,28 +39,24 @@ esp_err_t WS::init(void)
 
     esp_websocket_client_config_t cfg = {};
     cfg.uri = uri;
-    cfg.buffer_size = 8192;                         /*!< 接收缓冲(partial 又小又密,调大防丢) */
+    cfg.buffer_size = 8192;                         /*!< 接收缓冲(下行 JSON 都不大, 防粘包) */
     cfg.network_timeout_ms = WS_CONNECT_TIMEOUT_MS;
     cfg.disable_auto_reconnect = true;              /*!< 断线交给上层重建(ws_keeper) */
     cfg.disable_pingpong_discon = true;             /*!< 禁用协议层 PONG 超时 abort(保活交给上层) */
 
-    /* ★ 把组件的收包任务钉到 CPU0, 与 voice_task / ws_keeper 同核。
-     *   理由: 组件 TX/RX **共用一把 client->lock**
-     *   (CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK 未开), 同核能把抢锁退化成
-     *   核内短临界区, 避免跨核缓存同步开销。
+    /* ★ 把组件的收包任务钉到 CPU0, 与 voice_task / ws_keeper 同核:
+     *   组件 TX/RX **共用一把 client->lock** (CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK
+     *   未开), 同核能把抢锁退化成核内短临界区, 省掉跨核缓存同步。
      *
-     *   ⚠️ 必须同时设 task_core_id_set! 组件实现是:
-     *        if (config->task_core_id_set) cfg->task_core_id = config->task_core_id;
-     *        else                          cfg->task_core_id = tskNO_AFFINITY;   ← 默认不绑核
-     *      因为 0 本身是合法核号, 没法用 0 表示"没设置", 所以组件专门加了
-     *      一个 bool 开关(esp_websocket_client.h:129)。
-     *      只写 task_core_id = 0 是**无效的**, 会被当成未设置而走 tskNO_AFFINITY。
+     *   ⚠️ 必须同时设 task_core_id_set! 组件实现是
+     *        task_core_id_set ? task_core_id : tskNO_AFFINITY
+     *      —— 0 本身是合法核号, 没法用 0 表示"没设置", 所以组件另加了个 bool 开关
+     *      (esp_websocket_client.h:129)。只写 task_core_id=0 是**无效的**。
      *
-     *   task_prio 留 0: 组件默认会给 WEBSOCKET_TASK_PRIORITY(=5)。
-     *   task_stack 留 0: 组件默认会给 WEBSOCKET_TASK_STACK(=4K)。 */
+     *   task_prio / task_stack 留默认 (组件给 5 / 4K)。 */
     cfg.task_core_id_set = true;
     cfg.task_core_id     = 0;
-    cfg.task_prio        = 5;                       /*!< 与默认值一致, 写出来只为明确 */
+    cfg.task_prio        = 5;                       /*!< 与组件默认值一致, 写出来只为明确 */
 
     m_ws = esp_websocket_client_init(&cfg);
     if (m_ws == NULL) {
@@ -151,16 +150,12 @@ void WS::set_svc_ok_callback(ws_svc_ok_cb_t cb, void *ctx)
 }
 
 /* ★★ 单位换算: esp_websocket_client 的 timeout 参数是 **RTOS ticks, 不是毫秒**
- *   (头文件 esp_websocket_client.h:279 明写 "Write data timeout in RTOS ticks";
- *    组件内部 :742 才是 `timeout * portTICK_PERIOD_MS`, 即它自己按 ticks 用)。
- *
- *   ⚠️ 不换算的后果: CONFIG_FREERTOS_HZ=100 时, 传 1000 会被当成 1000 ticks
- *      = **10000 ms = 10 秒**, 而代码里那个常量叫 WS_SEND_TIMEOUT_MS(1 秒)。
- *      10 秒的代价很具体: 音频发一帧阻塞 10 秒 → 采音循环 10 秒没读 DMA,
- *      而 DMA 缓冲只有 128ms → 这一整段音频全丢。
- *
- *   ⚠️ 下限必须夹到 1 tick: pdMS_TO_TICKS(1..9) == 0 @HZ=100,
- *      而组件里 timeout=0 表示"不等待"(拿不到锁立即失败), 不是"很短"。 */
+ *   (esp_websocket_client.h:279; 组件内部 :742 才是 timeout*portTICK_PERIOD_MS)。
+ *   ⚠️ 不换算的后果: @HZ=100 时传 1000 会被当成 1000 ticks = **10 秒**, 而常量
+ *      却叫 WS_SEND_TIMEOUT_MS(1 秒) —— 音频发一帧阻塞 10 秒, 而 I2S DMA 只有
+ *      128ms → 这一整段音频全丢。
+ *   ⚠️ 下限必须夹到 1 tick: pdMS_TO_TICKS(1..9)==0 @HZ=100, 而组件里 timeout=0
+ *      表示"不等待"(拿不到锁立即失败), 不是"很短"。 */
 static TickType_t ws_timeout_ticks(uint32_t timeout_ms)
 {
     TickType_t t = pdMS_TO_TICKS(timeout_ms);
@@ -246,6 +241,9 @@ void WS::ws_event_handler(void *handler_args, esp_event_base_t base,
     }
 }
 
+/* 累积 + 切出完整 JSON。
+ * [链] websocket_task → ws_event_handler → 【handle_data】 → dispatch_msg
+ * 处理 websocket 的粘包/分帧: 一次 DATA 可能带多条 JSON, 也可能只带半条。 */
 void WS::handle_data(const char *payload, int len)
 {
     if (payload == NULL || len <= 0) {
@@ -280,16 +278,10 @@ void WS::handle_data(const char *payload, int len)
 
             if (brace == 0 && i > start) {
                 /* 找到一条完整 JSON: [start, i]
-                 *
-                 * ★★ 就地分发, **不再拷到 1KB 的栈缓冲里**。原因两条:
-                 *   ① 长度上限: V2 下 LLM 的 {"type":"reply"} 可以带 2KB 正文,
-                 *      JSON 会超过 1KB 拷贝缓冲 → 一截断 cJSON 就解析失败
-                 *      → 整条回复被静默丢掉。就地分发没有长度上限。
-                 *   ② 栈压力: websocket_task 栈只有 4K, 而回调链里
-                 *      post_stream 还要放 2KB 的 stream_msg_t —— 省掉这 1KB 很值。
-                 *
-                 * cJSON_Parse 内部会把字符串复制走, 所以"临时把下一个字节改成
-                 * '\0' → 分发 → 改回来"是安全的。 */
+                 * ★★ 就地分发, 不再拷到 1KB 栈缓冲: ① V2 下 LLM 的 reply 可带 2KB
+                 *    正文, JSON 超 1KB 会被截断 → cJSON 解析失败 → 整条回复静默丢失;
+                 *    ② websocket_task 栈只有 4K, 回调链里 post_stream 还要放 2KB。
+                 *    cJSON_Parse 内部会复制字符串, 所以"临时改 '\0' 再改回"是安全的。 */
                 char saved = m_rx_buf[i + 1];   /* i+1 <= m_rx_len, 而 m_rx_buf[m_rx_len] 就是 '\0' */
                 m_rx_buf[i + 1] = '\0';
                 dispatch_msg(m_rx_buf + start, i - start + 1);
@@ -315,7 +307,9 @@ void WS::handle_data(const char *payload, int len)
     }
 }
 
-/* 解析单条完整 JSON 消息并分发 */
+/* 解析单条完整 JSON 消息并按 type 分发。
+ * [链] websocket_task → WS::handle_data → 【dispatch_msg】
+ *      → 查表 → RtAsr::handle_asr/final 或 Llm::handle_partial/reply */
 void WS::dispatch_msg(const char *msg, int len)
 {
     cJSON *root = cJSON_Parse(msg);
@@ -336,17 +330,15 @@ void WS::dispatch_msg(const char *msg, int len)
 
     /* 通用帧由 WS 自己处理 */
     if (strcmp(type, "error") == 0) {
-        /* ★ 这里【故意不 return】—— 继续往下走查表分发。
-         *   原因: 只打日志的话, 上层(voice)不知道"服务器已经放弃这一轮了",
-         *   会继续白发音频。UiBridge 注册了 "error" 处理器, 由它决定怎么收尾。
-         *   (type 是 "error", 不会命中下面的 svc_ok/pong, 自然落到查表。) */
+        /* ★ 这里【故意不 return】—— 继续往下查表分发。只打日志的话上层(voice)
+         *   不知道"服务器已放弃这一轮", 会继续白发音频; UiBridge 注册了 "error"
+         *   处理器由它收尾。(type 是 "error", 不会命中下面的 svc_ok/pong) */
         ESP_LOGE(TAG, "网关错误: %s", msg);
     }
     if (strcmp(type, "svc_ok") == 0) {
         ESP_LOGI(TAG, "服务切换成功: %s", msg);
-        /* ★ 这才是"服务器已切好"的**真信号** —— 通知在等它的人。
-         *   (voice_session 原来只能盲等 300ms, 服务器慢一点就会
-         *    "在旧服务上发 start", 而那种错是静默的) */
+        /* ★ 这才是"服务器已切好"的**真信号**(V1 只能盲等 300ms, 服务器慢一点就会
+         *   "在旧服务上发 start", 而那种错是静默的) → 通知在等它的人 */
         if (m_svc_ok_cb != NULL) {
             m_svc_ok_cb(m_service, m_svc_ok_ctx);
         }
@@ -357,11 +349,8 @@ void WS::dispatch_msg(const char *msg, int len)
         return;
     }
 
-    /* ★ V2(PROTOCOL.md): 所有业务下行统一走下面这张表 ——
-     *   "asr" / "final"     → RtAsr 注册的处理器
-     *   "partial" / "reply" → Llm 注册的处理器 (未接入时就是未注册 → 丢弃)
-     *   V1 因为 partial 被 text 和 llm 共用, 这里有一整套"按 m_service 分流"的特判;
-     *   V2 里 asr 只属于 text、partial 只属于 llm, 一维 type 就能区分 → 特判已删。 */
+    /* ★ V2: 所有业务下行统一走下面这张表 —— asr/final → RtAsr, partial/reply → Llm
+     *   (未注册的类型直接丢弃)。V1 那套"按 m_service 分流 partial"的特判已删除。 */
 
     /* 查表分发 */
     for (int i = 0; i < m_handler_count; i++) {

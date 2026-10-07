@@ -26,7 +26,8 @@ static int32_t          s_accum = 0;      /* 净跳变累加器 (临界区保护
 /* 临界区锁: ISR 用 _ISR 变体, 任务用普通变体, 保证跨核互斥 (ESP-IDF 标准做法) */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* 双边沿中断: 任一编码器脚跳变都进来, 状态机解出方向并累加。
+/* [链] GPIO中断(A/B双相) → 【encoder_isr】 → s_accum → [lvgl任务] lvgl_encoder_read_cb
+ * 任一编码器脚跳变都进来, 查方向表解出 ±1 并累加。
  * 抖动引起的来回(+1/-1)会在累加器里自然抵消。 */
 static void IRAM_ATTR encoder_isr(void *arg)
 {
@@ -82,7 +83,7 @@ esp_err_t encoder_init(void)
 
 int encoder_consume_raw(void)
 {
-    /* 临界区取走全部净跳变并清零: 保证不丢 ISR 期间的累加, 且跨核安全 */
+    /* [链同] 消费端: 临界区取走全部净跳变并清零 —— 跨核安全, 不丢 ISR 期间的累加 */
     portENTER_CRITICAL(&s_mux);
     int32_t v = s_accum;
     s_accum = 0;

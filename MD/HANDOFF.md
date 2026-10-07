@@ -1,7 +1,11 @@
 # Lanlink 交接文档（Handoff）
 
 > 本文件是**接手本项目的入口**。先读这里，再按需读文末「文档索引」。
-> 最后更新：**阶段 1 完成**（输入事件化已在硬件验证；待 commit）。下一步补阶段 0，然后进阶段 2。
+> 最后更新：**阶段 0 / 1 / 2 / 3 全部完成并上机验证**，只剩**阶段 4（清理加固）**。
+> ★★ **协议已升到 V2**（见 [`PROTOCOL.md`](PROTOCOL.md)）：ASR 下行从"增量 `partial`"改成
+> **全量 `{"type":"asr"}`**，`revise` 废除，`partial` 从此只属于 llm/openclaw。**读代码前先看那份。**
+> ★★ **本轮最大的坑是硬件的**：所有"看起来像软件 bug"的现象（按键误报/ISR 风暴/3.3V 被拉低）
+> 根因都是**面包板的地没接回板子**（见 §5.0）。
 
 ---
 
@@ -33,15 +37,34 @@ UI 用 **SquareLine Studio 1.6.2** 设计并导出（5 屏：home / main / Balan
 
 ### 引脚分配（**勿与 PSRAM 冲突**）
 
-| 用途 | 引脚 |
-|---|---|
-| 屏幕 SPI2 | SCLK=21, MOSI=20, RST=19, DC=47, CS=48, BL=45 |
-| 编码器 | A=**7**, B=**15** |
-| 物理键 | IO10=录音键, IO8=服务键（均为按下为低，内部上拉） |
-| I2S 麦克风 | BCLK=11, WS=12, DIN=13 |
+> ★★ **以代码为准** —— 下表按代码逐项核实过。原始定义位置见末尾一列。
+> 遇到引脚行为诡异（上电拉低 / 误触发 / 无反应），**第一步就是打开这些头文件对一遍实际连线**。
+
+| 用途 | 引脚 | 定义位置 |
+|---|---|---|
+| 屏幕 SPI2 | SCLK=**9**, MOSI=**46**, RST=**3**, DC=**8**, CS=**18**, BL=**17** | `main/display/lcd_display.hpp:21-26` |
+| 编码器 | A=**45**, B=**41** | `main/drivers/encoder.hpp:22-23` |
+| 物理键 | **录音 = GPIO_NUM_2**、**服务 = GPIO_NUM_42**（均按下为低、内部上拉）| `main/main.cpp:40-41` |
+| I2S 麦克风 | BCLK=**21**, WS=**47**, DIN=**1** | `main/drivers/i2s_mic.hpp:29-31` |
+
+> ⚠️ **这张表全改过好几轮**（屏幕三版、编码器和按键各一版），早期文档里的
+> `SCLK=21/MOSI=20/RST=19/DC=47/CS=48/BL=45`、`A=7/B=15`、`IO10/IO8`、`BCLK=11/WS=12/DIN=13`
+> **全部作废**。上表的值才是当前硬件。
+
+⚠️ **用到了几个"特殊脚"，合法但必须知道：**
+
+| 脚 | 特殊之处 | 用在哪 |
+|---|---|---|
+| GPIO45 / GPIO46 | **strapping**（VDD_SPI 电压 / ROM 打印）| 编码器 A、屏 MOSI |
+| GPIO3 | **strapping**（JTAG 源选择）| 屏 RST |
+| GPIO39–42 | **JTAG 默认功能**（MTCK/MTDO/MTDI/MTMS）| 编码器 B=41、服务键=42 |
+
+→ 当普通 GPIO 用没问题（**前提是不接 JTAG 调试**），**但上电瞬间有默认电平** ——
+将来若再遇到"开机头几秒引脚状态异常"，**先怀疑这几个**。
 
 ⚠️ **n16r8 的 Octal PSRAM 占用 GPIO33–37**（D4=33…DQS=37）→ 屏幕/外设**绝不能用 33/34/35/36/37**。
 > 历史教训：屏幕旧引脚曾用 35/36/37，与 PSRAM 冲突导致雪花 + PSRAM 位翻转（见 §6）。
+> （当前引脚组里没有 33–37 ✓）
 
 ### 屏幕 bring-up 旋钮（`main/display/lcd_display.hpp`）
 
@@ -59,16 +82,16 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 | 项 | 状态 |
 |---|---|
 | 分支 | `CH_rebuild_logic` |
-| 最新提交 | `763f5a2 修复抖动_阶段1完成` |
-| 工作区 | 有未提交改动（阶段 1 收尾 + 阶段 0 + **阶段 2**，**已构建通过 + 已上机验证**） |
-| 阶段 | **阶段 0 + 1 + 2 完成**；下一个是**阶段 3**（真采音闭环） |
+| 最新提交 | `79fb6da LvglUI 优化_显示流式文字_阶段三完成` |
+| 工作区 | 有未提交改动（`MD/REBUILD.md`、`main/business/ui_bridge.cpp`）|
+| 阶段 | **阶段 0 + 1 + 2 + 3 完成**；下一个是**阶段 4**（清理加固）|
 
 ### 各阶段成果
 
 **阶段 1（已硬件验证）** —— 输入事件化：
 
 - ✅ 转编码器 → LVGL indev → 切屏正常（**无独立任务、无跨任务锁**）
-- ✅ 按 IO10 / IO8 → GPIO 中断 + esp_timer 消抖 → 边沿回调正常（**无轮询**）
+- ✅ 按录音键 → GPIO 中断 + esp_timer 消抖 → 边沿回调正常（**无轮询**）
 - ✅ 无 Guru Meditation / 死锁 / Task WDT
 
 期间修掉的 3 个坑（都已记入 §5 / §6，务必读）：
@@ -85,17 +108,23 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 **阶段 2（已硬件验证）** —— ws_keeper + UiBridge + voice：
 
 - ✅ 三条队列（`voice_q` / `resp_q` / `stream_q`）+ asr 回调接线 + UI 消费 timer
-- ✅ `ws_keeper_task`（连接生命周期 + 状态上报）、`voice_task`（命令驱动，**假会话不采音**）
+- ✅ `ws_keeper_task`（连接生命周期 + 状态上报）、`voice_task`（命令驱动）
 - ✅ `main.cpp` 重写：WiFi + WS + 三任务 + 按键接线
-- ✅ **实测通过**：冷启动建连 + 切 text；按 IO10 走完 `start → end`；
-  `ws_keeper → resp_q → lvgl 任务` 整条跨任务链路打通（日志 `[结果] kind=2 ... status=0`）
-- ✅ **队列内存实测 8932 字节**（`resp_msg_t` 524 × 16 + `stream_msg_t` 516 + `voice_cmd_msg_t` 8 × 4）
-  —— 这个数字是"消息结构没被改坏"的硬指标，改结构后要对照
+
+**阶段 3（已硬件验证，本轮主体）** —— 真采音闭环 + 上屏：
+
+- ✅ **part A 真采音**：`voice_session` 完整跑通（等连接 → 切 text + 等 `svc_ok` → `start`
+  → `mic.start` → 采音循环 → `mic.stop` + `end`）。实测 `共发 284 帧 (=11.4 秒音频), 读失败 0 帧`
+- ✅ **part B 上屏**：`ui_bridge.cpp` 里 `chat_view_*` 那一套 —— 按下就出空气泡、逐字流式、
+  `is_final` 定格、超限淘汰最老的（`CHAT_MAX_BUBBLES = 10`）
+- ✅ **协议升到 V2**（本轮最大改动，见 §6-B 与 [`PROTOCOL.md`](PROTOCOL.md)）
+- ✅ 顺手修掉：压缩字体不显示（§6-C）、ws 发送超时单位（§6-I）、55 秒单轮上限（§6-G）、
+  按键误报/ISR 风暴（§5.0，根因是**接地**）
 
 ### 👉 下一步
 
-进**阶段 3**（真采音闭环）：把 `voice_session` 的假会话换成真采音循环
-（骨架已写在 `voice.cpp` 注释里，含三个必须注意的边界），并接 `stream_q` 流式上屏。
+进**阶段 4（清理加固）**，清单见 §9。核心几条：
+`printf` 已降级过了；剩下 `xQueueCreateStatic` + PSRAM、`UiBridge` 拆分、渲染提速（137ms/轮）。
 
 ---
 
@@ -106,16 +135,16 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 核心思路（一句话）：**业务从"状态机轮询"改为"事件/命令驱动"**，
 `RtAsr`/`Llm`/`WS` 协议层几乎不动（干净无状态），重写的是调度层（`AppFsm` 退役）。
 
-阶段划分：~~0 基础设施~~（**已补**）→ ~~1 输入事件化~~（**已硬件验证**）→ ~~2 ws_keeper+UiBridge~~（**已硬件验证**）→ **3 语音采音闭环（下一个）** → 4 清理。
+阶段划分：~~0 基础设施~~ → ~~1 输入事件化~~ → ~~2 ws_keeper+UiBridge~~ → ~~3 语音采音闭环 + 上屏~~（**以上全部已硬件验证**）→ **4 清理加固（只剩这个）**。
 
 
-### 阶段 2 的任务/上下文地图（**这是读代码的入口**）
+### 任务/上下文地图（**这是读代码的入口**，阶段 3 后的现状）
 
 | 任务 | 核 | prio | 栈 | 职责 |
 |---|---|---|---|---|
-| `lvgl` | 1 | 2 | 6K | 渲染 + 编码器 indev + **UI 队列消费 timer(50ms)** |
+| `lvgl` | 1 | 2 | 6K | 渲染 + 编码器 indev + **UI 队列消费 timer(50ms)** ← 气泡上屏也在这里 |
 | `ws_keeper` | 0 | 5 | 8K | WS 连接生命周期：建连 / 重连 / ping 保活。**不切服务**（归 voice_task） |
-| `voice` | 0 | 6 | 6K | 命令驱动语音会话（阶段 2 是**假会话**，不采音） |
+| `voice` | 0 | 6 | 6K | 命令驱动语音会话（**真采音**：等连接 → 切 text + 等 svc_ok → start → 采音 → end） |
 | `websocket_task` | 0 | 5 | 4K | **组件自带**：收包 → 同步跑 WS 回调（在 `ws.cpp` 钉核） |
 | ~~按键 / 编码器~~ | — | — | — | **无任务**：GPIO 中断 + esp_timer / LVGL indev |
 
@@ -123,7 +152,7 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 
 ```
 按键(中断→esp_timer) --voice_q--> voice_task --asr.start/send_audio/end--> 服务器
-服务器 --> websocket_task(回调) --resp_q/stream_q--> lvgl 任务(UI timer) --> 屏幕
+服务器 --> websocket_task(回调) --resp_q(状态)/stream_q(完整文本)--> lvgl 任务(UI timer) --> 气泡
 ```
 
 > ⚠️ 阶段 2 往 **CPU0** 加了 3 个东西（`ws_keeper` prio5、`voice` prio6、组件 `websocket_task` prio5）。
@@ -133,9 +162,9 @@ LCD_RGB_ORDER_RGB 1;  LCD_SWAP_BYTES 1;  LCD_INVERT_COLOR 1;
 
 ---
 
-## 5. 输入链路（阶段 1，**已全部解决**）
+## 5. 输入链路（**已全部解决**；★ 5.0-A 是真根因，务必读）
 
-### 5.0 阶段 3 新冒出来的两个按键问题 —— 已修（源码级定位）
+### 5.0 阶段 3 冒出来的两个按键问题 —— 已修（**但只是防线，真根因见 5.0-A**）
 
 **症状**：① 开机 2.4 秒、用户没碰按键，冒出 `[按键] 录音键 松开 → voice_stop`；
 ② `Guru Meditation Error: Core 0 panic'ed (**Interrupt wdt timeout on CPU0**)`，
@@ -166,9 +195,42 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 每次上报时打"期间中断 N 次"，并在 voice 的每秒 `level=` 日志里打累计值。
 **正常一次按键 = 几次~几十次；几百/几千 = 引脚在噪声里翻转**（接触不良/悬空/上拉没接上）。
 
-> ⚠️ 硬件侧仍未定案：面包板 + **无并联电容** + 10k 外部上拉。
-> **决定性测试**：把 IO10 用一根线**直接短到 3.3V**，看还冒不冒事件。
-> 不冒 → 接线/按键问题；还冒 → GPIO 配置或软件问题。
+### ★★ 5.0-A 这两个问题的【真正根因】是接地（用户的硬件发现）
+
+上面 ①② 我都当作软件 bug 修了（`gpio_config` 后等稳定 / ISR 限流）—— **那些修法有用，但只是防线；
+真正的根因是硬件，而且是用户自己查出来的**：
+
+**症状**：ESP32-S3-DevKitC-1 上电后 **3.3V 引脚被拉低约 4 秒**；按键引脚在头几秒被拉低
+→ 那条误报的"松开"；引脚在噪声里翻转 → ISR 风暴 → Interrupt WDT panic。
+
+**排查过程（用户做的）**：
+1. 只把板子的 **3.3V + GND** 接在面包板上 → **正常**
+2. 把整块板插上去（其他 GPIO 也连）→ **不正常**
+3. 一路拔到只剩一个麦克风 → **还是不正常**
+4. 把板子从面包板上拿下来单独测 → **3.3V 就是 3.3V，正常**
+5. ⇒ **结论：面包板上有些元件在把 3.3V 拉低**
+
+**根因**：**面包板上板子的【地】没有真正回到板子的 GND** ——
+整个地平面是靠**其他 GPIO 的下拉 / ESD 保护二极管**在维持。
+
+```
+正常:  模块 GND → 面包板 GND 轨 → 板子 GND 引脚 → 芯片地
+                          ↑ 这条路断了
+实际:  模块 GND → [回到 ESP32 的唯一通路只剩]
+                  GPIO 引脚 ←→ 内部 ESD 二极管 ←→ 芯片地   ← 电流在打保护二极管
+```
+
+**用户重新接线后，全部症状消失。**
+
+> ★★ **教训（这一整轮最值钱的一条）**：
+> **"按键误报松开 / ISR 风暴 / 3.3V 被拉低"这几个看起来 100% 像软件 bug 的现象，根因都是接地。**
+> 判断信号：**只在接了 GPIO 之后才出问题、只接电源线就正常** → 立刻去查地，别再改代码。
+>
+> ★ **还要回头质疑历史结论**：§9 记过"PSRAM 有历史位翻转"（当时归因于 80MHz + 屏幕引脚冲突）。
+> **如果那也是接地引起的，那条结论方向就是错的 —— 已标"待重新评估"**（见 §9）。
+
+> ⚠️ 剩下**未做**的硬件侧动作：面包板上按 10k 上拉 + **100nF 到 GND**（压噪声）。
+> 目前重接线后已经稳了，所以只是备用手段。
 
 ### ✅ 5.1 编码器无反应 —— 已修复（源码级定位）
 
@@ -264,6 +326,12 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 
 这些是读 LVGL / IDF / esp_websocket 源码确认的，不是猜测：
 
+> **本节字母索引**（本轮新增的 6-x 小节）：
+> **6-A** 消息载荷 / 队列内存（下面那张表）｜ **6-B** 协议 V2 ｜
+> **6-C** 🐛 压缩字体坑 ｜ 6-D **LVGL 布局 x/y/align 规则（在下面 "LVGL 9.5 具体行为" 表里）** ｜
+> **6-E** 聊天屏生命周期 / 悬空指针 ｜ **6-F** 气泡三层结构 ｜
+> **6-G** 55 秒单轮上限 ｜ **6-H** 音频链路实测基准 ｜ **6-I** 本轮修的其它 bug
+
 ### 架构级 4 坑（重构时必须遵守，详见 REBUILD.md）
 
 1. **`esp_websocket_client` 自己建任务收包**（`xTaskCreatePinnedToCore`，默认 `tskNO_AFFINITY` prio5）
@@ -285,6 +353,13 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 | ★ **`lv_group_focus_obj()` 内部会 `lv_group_set_editing(g,false)`**（`lv_group.c:242`，函数第一件事）—— **只要它真被调用，编辑模式就被清掉** | 用编码器 indev 时千万别随便调 `focus_obj`；`lv_group_add_obj()` 走的是 refocus→`focus_next_core`（直接改 `obj_focus`，**不清**编辑模式），两者行为不同，别以为等价 |
 | 转动 → 焦点对象收到 `LV_EVENT_KEY`；按 ENTER 松开 → `LV_EVENT_CLICKED` | 做"按钮触发"就挂 `LV_EVENT_CLICKED` |
 | **`lv_screen_active()` 是聚焦对象**才能收到键 | SquareLine 把切屏事件挂在**屏幕对象**上 |
+| ★★ **一个对象的 `x`/`y`/`align` 是否生效，取决于【它的父对象】有没有 layout** | 源码：`lv_obj_pos.c:777` `lv_obj_refr_pos()` 开头就是 `if(lv_obj_is_layout_positioned(obj)) return;`，而 `:356` 的实现是"父对象有 layout → true"。**父对象有 flex/grid 时，孩子的 x/y/align 全被忽略** |
+| flex 布局**直接改 `item->coords`** | `lv_flex.c:555-567`：`diff_x = abs_x - item->coords.x1 + ...; item->coords.x1 += diff_x;` —— 之前设的 x/y/align 一律被覆盖。所以 SquareLine 导出里那些"无效坐标"删不删都不影响，但留着会让预览和真机不一致 |
+| **flex 不支持"每条单独对齐"** | `cross_place` 是**整容器一个值**，所有孩子一样 → 做不到"我的靠右、对方的靠左"。破解办法见 §6-F（每条套一层 wrapper） |
+| `lv_obj_create(NULL)` 会创建一个**新屏幕**，不是子对象 | ★ 拿可能为 NULL 的指针当父对象之前**必须先判空**，否则会静默造出一个屏幕 |
+| `lv_obj_is_valid(obj)`（`lv_obj.c:450`）**只做指针比较、不解引用入参** | 遍历所有 display 的屏幕对象树比对指针 → **对悬空指针也是安全的**。这是它最宝贵的性质，见 §6-E |
+| `lv_obj_update_layout()` 在 `lv_timer` 回调里调用是安全的 | `lv_obj_pos.c:383` 开头 `if(update_layout_mutex) { LV_LOG_TRACE("Already running, returning"); return; }` → **重入直接早退，不会死锁** |
+| `LV_ALIGN_TOP_RIGHT` 会被算进高度 | `lv_obj_pos.c:1492` 把 `LV_ALIGN_DEFAULT / TOP_RIGHT / TOP_MID / TOP_LEFT` 一起归入 "Normal top aligns"，`child_res = child->coords.y2 - obj->coords.y1 + 1` → 父对象的 `SIZE_CONTENT` 高能正确等于这个孩子的高。**换成 `LV_ALIGN_CENTER` 会走 `default` 分支，结果不同** |
 
 ### IDF / FreeRTOS
 
@@ -328,33 +403,130 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 | 🐛 **已修** `voice_session` 的"等连接"循环（最长 15 秒）**不消费 `voice_q`** | 期间 `voice_task` 是 `voice_q` 唯一的消费者，一不消费：① 深度只有 4，按几次就满 → 后续按键被 `xQueueSend(...,0)` 丢弃；② **`VOICE_STOP` 也一起丢 → 用户松手被忽略** → 连上后照常录一段用户不要的会话。实测踩过开机 2.4s（还没连上）打出 `voice_q 满, VOICE_STOP 丢弃`。已抽 `voice_q_drain()` 并在**所有等待循环**里调用（发现 STOP 就取消本轮） |
 | ★ **`voice_session` 会等服务器回 `svc_ok` 才发 `start`**（`wait_svc_ok()`，上限 300ms） | 信号链：服务器回 `svc_ok` → `ws.cpp:331` 调 `m_svc_ok_cb` → `UiBridge::on_svc_ok` → 投 `VOICE_SVC_ACKED`。**实测网关对重复的 `svc` 也照回 ack（61~63ms，5/5）** → 300ms 有 5 倍余量，不需要"超时也放行"的兜底 |
 
-### 消息载荷的约定（`bus_msg.hpp`）★ 改动前务必先读
+### 6-A 消息载荷 / 队列内存（`bus_msg.hpp`）★ 改动前务必先读
+
+三条通道（`voice_q` / `resp_q` / `stream_q`）。**V2 起 `stream_q` 只装"完整文本"。**
 
 | 事实 | 含义 |
 |---|---|
-| `resp_msg_t` 的载荷是 **union**（`u.text[512]` / `u.i32` / `u.f32` / `u.sta`），**`kind` 决定读哪一项** | 消费端**必须**先看 `kind` 再取 `u` —— 拿状态类的消息去读 `u.text` 会打出乱码（`drain_queues` 里已按 kind 分支） |
-| **union 成员必须是"平凡类型"，且不得含指针** | 队列靠 `memcpy` 搬字节，只保护这 512 字节本身。成员里若放了 `char*`，等于把值拷贝退回成"指针 + 一块无人保护的内存"（悬空/被改写）。要放字符串就用**内联定长数组** |
-| union 大小 = **最大成员**（现为 `text[512]`）→ `resp_msg_t` 恒为 **524 字节** | 新增成员只要 ≤ 512，**队列内存不变**（实测总数 8932）。加了 8 字节对齐的类型（某些 ABI 下 `double`）会让结构体涨到 528 —— 加完请对照那行启动日志 |
-| **状态统一走 `status_kind_t`**（CONNECTED/DISCONNECTED/RECONNECTING/STARTED/ENDED/ABORTED） | 不管哪个服务，报给 LVGL 的状态都写进这个枚举；投递用 `post_resp_status(kind, status)`。**标签仍按服务分**（`RESP_ASR_STATUS` / `RESP_WS_STATUS`）以保留"谁报的" |
-| 三个投递接口最后都走 **`post_resp_msg()`** 入队 | 那是 `resp_q` 的**唯一入队点**：`timeout=0` 的硬要求和"满了告警"只写一份。加新载荷类型时，调用方自己填 `resp_msg_t` 再调 `post_resp_msg()` 即可，**不用改 UiBridge** |
+| ★★ **V2: `stream_q` 上的 `text` 永远是【完整文本】，不是增量** | 消费者**零累积状态** —— 收到什么就 `lv_label_set_text` 什么。V1 那套"partial 追加 / revise 覆盖 / final 覆盖"三条语义不同的路已废除（实测出过"`revise` 的片段把累积好的整句冲掉，屏幕上只剩 `结果` 两个字"） |
+| **`stream_msg_t` 加了 `is_final`** | 把"流式"和"完成"合并到同一条消息里 → `resp_q` 不再需要 `RESP_ASR_FINAL`/`RESP_LLM_FINAL`（**已删**） |
+| **`BUS_TEXT_LEN` = 2048**（**只用在 `stream_q`**，深度 1 覆盖式 → 只占一份） | 所以开大很便宜：512→2048 只多花 1.5KB。**"长文本只走覆盖式队列"** 是这条链的关键 —— 长文本若走深 16 的 `resp_q`，2048 就要 32KB，根本做不到 |
+| 🐛 **`BUS_TEXT_LEN_SHORT` = 64**（`resp_q` 用，深 16）—— **V1 遗留的洞，已缩** | V1 时 `RESP_ASR_FINAL` 走 `resp_q` 装完整句 → 得给 512。V2 后识别结果全走 `stream_q`，那个 512 就变成空气：**`512 × 16 = 8384 B`**，而每条实际只用 `u.sta` 的 4 字节。缩到 64（≈21 汉字，够放"服务切换超时"这类提示）后 `resp_q` 从 **8384 → 1216 B** |
+| **队列总计 3304 B**（V1 是 8932 B） | `stream_msg_t` 2056×1 + `resp_msg_t` 76×16 + `voice_cmd_msg_t` 8×4。代码里留了钉子注释："**别照 V1 的老尺寸改回去**；真需要长文本走 `stream_q`，`resp_q` 深 16，**这里每 +1 字节就是 ×16**" |
+| `resp_msg_t` 的载荷是 **union**（`u.text[64]` / `u.i32` / `u.f32` / `u.sta`），**`kind` 决定读哪一项** | 消费端**必须**先看 `kind` 再取 `u` —— 拿状态类去读 `u.text` 会打出乱码（`drain_queues` 里已按 kind 分支） |
+| **union 成员必须是"平凡类型"，且不得含指针** | 队列靠 `memcpy` 搬字节，只保护这块内存本身。放 `char*` 等于把值拷贝退回成"指针 + 一块无人保护的内存"（悬空/被改写）。要放字符串就用**内联定长数组** |
+| **状态统一走 `status_kind_t`**（CONNECTED/DISCONNECTED/RECONNECTING/STARTED/ENDED/ABORTED） | 投递用 `post_resp_status(kind, status)`。**标签仍按服务分**（`RESP_ASR_STATUS` / `RESP_WS_STATUS`）以保留"谁报的"。★ **聊天屏就是靠 `RESP_ASR_STATUS` 的 `STARTED`/`ENDED` 驱动气泡生命周期的**（按下就出空气泡、结束收尾，见 §6-F） |
+| 三个投递接口最后都走 **`post_resp_msg()`** 入队 | 那是 `resp_q` 的**唯一入队点**：`timeout=0` 的硬要求和"满了告警"只写一份。加新载荷类型时，调用方自己填 `resp_msg_t` 再调它即可，**不用改 UiBridge**。（`post_resp` 现在**没有调用者** —— 留给未来 `RESP_STATUS` 短提示用） |
 | `voice_cmd_msg_t.arg` 是**标量参数槽位**（4 字节），当前**全部传 0、没人读** | 装不下文本；**更不要拿它塞指针**（32 位机上 `int32_t` 和指针同宽，编译通过但会引入悬空） |
-| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 只在**状态变化**时投一条，理由有两条：① 状态没变还重复投，UI 每 50ms 会刷出同一句话（白白重绘）；② `DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 —— 免得 UI 一上来就说"断线"。**注意：这不是"防队列溢出"** —— 消费者 `lv_timer` 每轮把 `resp_q` 取空，重连循环 5 条/秒远低于消费能力 |
+| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 只在**状态变化**时投一条，理由有两条：① 状态没变还重复投，UI 每轮会刷出同一句话（白白重绘）；② `DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 —— 免得 UI 一上来就说"断线"。**注意：这不是"防队列溢出"** —— 消费者 `lv_timer` 每轮把 `resp_q` 取空，重连循环 5 条/秒远低于消费能力 |
 
-### 消息载荷的约定（`bus_msg.hpp`）★ 改动前务必先读
+### 6-B ★★ 协议 V2：ASR 从"增量"改成"全量"（**完整规范见 [`PROTOCOL.md`](PROTOCOL.md)**）
 
 | 事实 | 含义 |
 |---|---|
-| `resp_msg_t` 的载荷是 **union**（`u.text[512]` / `u.i32` / `u.f32` / `u.sta`），**`kind` 决定读哪一项** | 消费端**必须**先看 `kind` 再取 `u` —— 拿状态类的消息去读 `u.text` 会打出乱码（`drain_queues` 里已按 kind 分支） |
-| **union 成员必须是"平凡类型"，且不得含指针** | 队列靠 `memcpy` 搬字节，只保护这 512 字节本身。成员里若放了 `char*`，等于把值拷贝退回成"指针 + 一块无人保护的内存"（悬空/被改写）。要放字符串就用**内联定长数组** |
-| union 大小 = **最大成员**（现为 `text[512]`）→ `resp_msg_t` 恒为 **524 字节** | 新增成员只要 ≤ 512，**队列内存不变**（实测总数 8932）。加了 8 字节对齐的类型（某些 ABI 下 `double`）会让结构体涨到 528 —— 加完请对照那行启动日志 |
-| **状态统一走 `status_kind_t`**（CONNECTED/DISCONNECTED/RECONNECTING/STARTED/ENDED/ABORTED） | 不管哪个服务，报给 LVGL 的状态都写进这个枚举；投递用 `post_resp_status(kind, status)`。**标签仍按服务分**（`RESP_ASR_STATUS` / `RESP_WS_STATUS`）以保留"谁报的" |
-| 三个投递接口最后都走 **`post_resp_msg()`** 入队 | 那是 `resp_q` 的**唯一入队点**：`timeout=0` 的硬要求和"满了告警"只写一份。加新载荷类型时，调用方自己填 `resp_msg_t` 再调 `post_resp_msg()` 即可，**不用改 UiBridge** |
-| `voice_cmd_msg_t.arg` 是**标量参数槽位**（4 字节），当前**全部传 0、没人读** | 装不下文本；**更不要拿它塞指针**（32 位机上 `int32_t` 和指针同宽，编译通过但会引入悬空） |
-| 状态上报要**去抖**（见 `ws_keeper.cpp::report_ws_status`） | 重连循环约 1 轮/秒，`resp_q` 深度只有 16 —— 无脑投递十几秒就满，开始丢消息（含 `RESP_ASR_FINAL`）。故只在**状态变化**时投一条；`DISCONNECTED` 只在"连上过又断了"时报，开机没连上不报 |
+| ASR 下行改用 **`{"type":"asr","text":"<完整当前句>"}`**，**不再是** `partial` 增量 | 板子侧 `RtAsr::store_and_notify()` 一律 **`strlcpy`（覆盖）**，**零累积状态** |
+| `{"type":"final"}` 也必须是**完整句**（不是最后那一小段） | 网关**违反过**这条：实测收到 `{"type":"final","text":"结果"}`，把累积好的整句冲成了两个字 |
+| **`revise` 已废除** | `asr` 每次都是全量（自带修正），不需要单独的修正消息。网关**也违反过**：实测它在发 `revise`，而且内容有时是**片段**（`revise "喂"`），板子按"整体替换"用它覆盖 → 累积全丢 |
+| **`partial` 从此只属于 `llm`/`openclaw`**（仍是增量） | 但**累积发生在板子的 `Llm` 驱动里**（`llm.cpp::handle_partial` 里 `strlcat`），**发布到总线时已经是完整回复** |
+| ★ **为什么 LLM 的累积必须在驱动侧做** | 总线上的 `stream_q` 是**深度 1 覆盖式**。若把增量原样放进去、让 UI 侧累积，UI 每 ~137ms 才取一次 → **中间的增量被覆盖 → 永久丢字**。在驱动侧累积则每条 partial 都同步并进 `s_stream`，覆盖多少次都无所谓 |
+| **副作用（正向）**：`ws.cpp::dispatch_msg` 里那套"`partial` 按 `m_service` 分流"的特判**整体删掉了** | V1 因为 `partial` 被 text 和 llm 共用，一维 `type` 分不出来；V2 里 `asr` 只属于 text、`partial` 只属于 llm → 一张 `type` 表就够。`set_partial_handler` 及其 4 个成员也一并删除 |
+| **实测证据（硬件已验证）** | `[流式] kind=0 final=0 text="..."` 逐步变长（全量替换，不是重复叠加）→ 最后 `final=1` 时整句完整 |
+| ⚠️ **迁移顺序不能反** | 必须**网关先改**（能发完整 `asr`），**再**烧板子。反过来（网关还发 `partial`、板子已改成覆盖）屏幕只会显示最后一个增量，更糟 |
+
+### 6-C 🐛 压缩字体坑（排查了很久，**必须留档**）
+
+**症状：chat 屏气泡「框的长度对，但一个字都不画」。**
+
+| 事实 | 出处 / 含义 |
+|---|---|
+| 根因：`ui_font_ch14.c` 的 **`.bitmap_format = 1`**（= `LV_FONT_FMT_TXT_COMPRESSED`），而 sdkconfig 里 `CONFIG_LV_USE_FONT_COMPRESSED` **未开** | 一句话：**"我是压缩的" + "我不会解压"** |
+| 链路：`lv_font_fmt_txt.c:109` 走 `bitmap_format != PLAIN` 的 `else` → `#if LV_USE_FONT_COMPRESSED` 为 0 → `LV_LOG_WARN("Compressed fonts is used but LV_USE_FONT_COMPRESSED is not enabled")` → **`return NULL`**（`lv_font_fmt_txt.c:207` 附近） | 一个像素都不画 |
+| ★★ **为什么"尺寸还是对的"** | **度量**走 `lv_font_get_glyph_dsc_fmt_txt()`，它**不看 `bitmap_format`**；**像素**走 `lv_font_get_glyph_bitmap_fmt_txt()`，它**看**。→ **两条路互相独立** |
+| ★★ **可复用的判据** | **"尺寸对、字不画" → 先怀疑【像素来源】，不要查尺寸计算。** 这个组合是这个 bug 的唯一特征 |
+| 为什么只有聊天屏中招 | 其它 7 个项目字体（`balance22`/`date22`/`icon18`/`time40`/`time64`/`updown10`/`weather18`）**全是 `bitmap_format = 0`**（明文），明文路径根本不碰解压器 |
+| ⚠️ **文件头那行 `Opts: ... --no-compress --no-prefilter` 是假的** | 那是转换器写的日志，**与实际不符**（实际数据是压缩的，实测 86% 体积）。**以 `.bitmap_format` 为准，别拿那行当依据** |
+| **修法（已采用第一个）** | ① `sdkconfig` **和** `sdkconfig.defaults` 里都加 `CONFIG_LV_USE_FONT_COMPRESSED=y`（两个都要 —— `defaults` 只在生成新 `sdkconfig` 时生效）；② 或在 SquareLine 里取消压缩重新导出（`bitmap_format` 变 0 → 不需要解压器、**渲染更快**，代价是编译后多约 90KB flash） |
+| 已把整条因果链写成注释放在 **`main/lvgl/fonts/ui_font_ch14.c` 顶部** | 以后重新导出该字体时，看到注释就知道要查 `.bitmap_format` 这一行 |
+| ⚠️ 排查时踩的自己的坑 | 我曾用脚本统计"实际字节 ÷ 明文应有字节"来判断是否压缩 —— **公式错了**（LVGL 字体位图按行字节对齐，且连已知正常的 `date22` 都对不上，只有 94%）。**教训：拿一个已知正常的样本做对照，否则测量本身就是噪声** |
+
+### 6-E 聊天屏的屏幕生命周期 + 悬空指针（**踩过**）
+
+| 事实 | 出处 / 含义 |
+|---|---|
+| SquareLine 的屏幕是**按需创建 + 离开即销毁** | `ui_chat.c:40` 注册 `LV_EVENT_SCREEN_UNLOADED` → `scr_unloaded_delete_cb` → `lv_obj_del_async` → `ui_chat_screen_destroy()` → **所有 `ui_*` 全局置 NULL** |
+| ⚠️ **陷阱：指针非 NULL ≠ 对象还活着** | 我们记在 `s_bubbles[]` / `s_live_label` 里的指针，屏幕一销毁就**全变悬空** → 下一次 `lv_obj_del(s_bubbles[0])` 就是 **use-after-free** |
+| **两道保险**（`ui_bridge.cpp::chat_view_sync_screen()`） | ① **换屏检测**：`s_ctx_hooked != ui_contextpanel` → 说明旧屏销毁、新屏刚建 → 清空所有记录 + 顺手删掉 SquareLine 预置的占位气泡；② **`lv_obj_is_valid()` 兜底** |
+| ★ **`lv_obj_is_valid()`（`lv_obj.c:450`）只做指针比较、不解引用入参** | 遍历对象树比对指针 → **对悬空指针也是安全的**。这是它在这个场景下最宝贵的性质 |
+| ⚠️ **必须判空才能当父对象** | `lv_obj_create(NULL)` 会创建一个**新屏幕**，不是子对象。所以 `chat_view_*` 一律先 `if (ui_contextpanel == NULL) return;`（并打日志） |
+| **不在聊天屏时收到识别结果 → 直接丢弃**（只留控制台 `[上屏] 当前不在聊天屏, 丢弃显示`） | 已知限制，**没做"回到聊天屏再补上"**。要做的话需要一个 PSRAM 环形缓冲存最近文字、回来时重放 |
+
+### 6-F 气泡三层结构（**wrapper 破解 flex 的"不能单独对齐"**）
+
+```
+ui_contextpanel  (flex column, 可滚动)
+└── roll   (wrapper: 310 宽 × SIZE_CONTENT 高, 透明)             ← flex 的孩子 → x/y/align 无效
+    └── panel (气泡: SIZE_CONTENT, align=TOP_RIGHT, 绿底)         ← 父无 layout → align 生效 ✓
+        └── label (文字: SIZE_CONTENT, max_width 280)             ← 文字在这
+```
+
+| 事实 | 含义 |
+|---|---|
+| 为什么要 wrapper | flex 不支持 per-child 对齐（见 §6 LVGL 表）。**wrapper 是 flex 孩子（被 flex 摆），panel 是 wrapper 孩子而 wrapper 没有 layout → panel 的 `align` 生效** ✓ |
+| **尺寸链条（`LV_SIZE_CONTENT` 全靠内容撑开）** | `label` 由文字度量撑开 → 加 padding(8/8/6/6) 得 `panel` → `panel` 的 align 撑开 `roll` 的高度（依据 `lv_obj_pos.c:1492`，见 §6 LVGL 表）→ `ui_contextpanel` 依次往下堆（间距 = 容器 `pad_row`） |
+| **生命周期** | **删父删子**：`lv_obj_del(roll)` 连带删 panel + label |
+| **文字不用自己开 char 数组** | `lv_label_set_text` 让 **LVGL 自己拷一份**内部管理，删 label 时自动回收 |
+| **超限淘汰最老的** | `CHAT_MAX_BUBBLES = 10`；满了就 `lv_obj_del(s_bubbles[0])` + 数组左移 |
+| **`lv_label_set_text` 不比较内容**（`lv_label.c:981`） | 同内容也会 free+malloc+重绘 → 靠"`stream_q` 非空才刷"避免白开销 |
+| **气泡被"会话状态"驱动，不是被文字驱动** | `RESP_ASR_STATUS` + `STARTED` → **按下就建一个空气泡**（`chat_view_begin_asr`）；`ENDED`/`ABORTED` → 收尾，**若整轮一个字都没出就把空气泡删掉**（`chat_view_end_asr`）。理由：按下到服务器回第一个字可能一两秒，中间没反馈用户会以为坏了 |
+| ★ **文字放 PSRAM 的方案当前用开关关着**（`CHAT_TEXT_IN_PSRAM = 0`，`ui_bridge.cpp`） | 路径是 `heap_caps_malloc(MALLOC_CAP_SPIRAM)` + `lv_label_set_text_static()`。**当初以为它坏了，其实根本是上面 §6-C 那个字体坑** —— 等真需要省内部 SRAM 时可以再把开关打开 |
+| ⚠️ **为什么 `lv_label_set_text` 的文字进不了 PSRAM** | LVGL 配的是 CLIB malloc（`CONFIG_LV_USE_CLIB_MALLOC=y`）= 标准 `malloc`，而 `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384` → **小于 16KB 的分配全落内部 SRAM**。想让文字进 PSRAM **必须显式 `heap_caps_malloc`** |
+| 内存账（为什么现在不用 PSRAM 也没事） | 一条识别结果通常 20~40 汉字 = 60~120 字节（`BUS_TEXT_LEN=2048` 是极端上限）；10 条 ≈ **1~2 KB 内部 SRAM**，可忽略。真正需要 PSRAM 的是**LLM 长回复**（每条可上千字节 → 10 条 20KB） |
+
+### 6-G 55 秒单轮上限（网关协议要求）
+
+| 事实 | 含义 |
+|---|---|
+| 网关规定**单轮最长 55 秒**（`APIserver.md` §2），超出回 `{"type":"error","code":3}` | 到点后网关已停止识别，再发音频全是白费 |
+| 板子侧 `VOICE_MAX_RECORD_MS = 50000`（`business/voice.cpp`），取 50 秒留 5 秒余量 | 网关的计数起点是它**收到 `start`** 的时刻，可能比我们早几十 ms，卡 55000 有踩线风险 |
+| 到点**走正常收尾**（`mic.stop` + `asr.end` + `ENDED`），**不是 abort** | 这样服务器的 `final` 还能回来，用户拿到的是完整识别结果 |
+| **兜底链路** | `ws.cpp` 的 `error` 分支**不再 `return`**（继续走查表分发）→ `UiBridge::on_ws_error` 解析 code → **1(讯飞错误) / 3(超时) 投 `VOICE_STOP`** 让采音收尾（用 `m_asr_active` 守卫，不在录音就不投）。2(llm失败)/4(未知服务) 只记日志 |
+| ★ **配套（不加就会出幽灵 bug）** | `UiBridge::voice_start()` **先清空 `voice_q` 再投 START** —— 否则 `on_ws_error` 投的 STOP 若恰好残留在队列里，会被下一轮开头的 `voice_q_drain` 当成"用户松手"→ **新会话刚按下去就被取消**，且日志看起来莫名其妙 |
+
+### 6-H 音频链路实测基准（**健康值，以后拿它对比**）
+
+```
+I (x) voice: level=314 | 本秒 发送=25 读失败=0 帧 (满帧应为 25), 读耗时均=34ms | GPIO中断累计=1
+I (x) voice: 会话结束 (正常), 共发 284 帧 (=11.4 秒音频), 读失败丢弃 0 帧 (=0.0 秒)
+```
+
+| 数字 | 健康值 | 判读 |
+|---|---|---|
+| **发送帧/秒** | **25~26**（满帧 = `1000/40`） | **明显偏少 → 正在丢音频**（整轮 >40ms/帧 → DMA 缓冲积压绕圈 → 音频有洞） |
+| **读失败帧** | **0** | 每多 1 就是 **40ms 音频被直接扔掉** |
+| **读耗时均** | **34~37ms** | 生产恒定 40ms/帧，本循环每轮 = 读 + 发。读≈35ms → 发送只花 ~5ms，**余量充足**；读≈0ms → 发送吃掉 ~40ms，刚好卡平，一点抖动就积压 |
+| **GPIO中断累计** | 一次按键涨 **几次~几十** | 几百/几千 = **引脚在噪声里翻转**（先查接线/接地，见 §5.0-A） |
+
+> ★ 盲区提醒：**DMA 积压时 `read_frame` 依然会成功**（返回的是缓冲里最老的数据），
+> 所以"发送帧数正常"**不能**单独证明没丢音频 —— 要**发送帧数 + 读耗时**一起看。
+
+### 6-I 本轮修的其它 bug（源码级定位）
+
+| 事实 | 含义 |
+|---|---|
+| 🐛 **`esp_websocket_client_send_*` 的 `timeout` 是 RTOS ticks，不是 ms**（`esp_websocket_client.h:279`） | 原 bug：把 `timeout_ms` 直接传进去 → `HZ=100` 时 `1000` 变成 **10 秒**。代价：音频发一帧最多阻塞 10 秒，而 I2S DMA 只有 **128ms** → 整段音频全丢。**修法**：`ws.cpp` 加 `ws_timeout_ticks()` 统一换算 + 下限夹到 **1 tick**（`pdMS_TO_TICKS(1..9)==0`，而组件里 `timeout=0` 表示"不等待"） |
+| 🐛 **WS 回调里的 `printf`+`fflush(stdout)`** → 改为 `ESP_LOGD` | 两个后果实测都踩到：① 持 `client->lock` 打串口 → 拖住 `voice_task` 的 `send_audio`；② 往 UART 灌字符 → UART 中断频繁触发（那次 Interrupt WDT panic 的 `EPC1` **正是 `uart_hal_write_txfifo`**） |
+| 🐛 **`esp_timer_restart` 从 ISR 里调【不轻】** → ISR 加"同 tick 限流" | 它做 `timer_list_lock()`（**屏蔽中断**）+ 64 位乘除 + **两次有序链表遍历**（`esp_timer.c:135-177`）。抖动时 ISR 反复重入 → CPU0 几乎 100% 泡在 ISR → 中断看门狗饿死 → panic。**修法**：`xTaskGetTickCountFromISR()` 判同 tick 只做一次，上限 100 次/秒（对 50ms 消抖完全够） |
+| 🐛 **`button_edge_init` 里 `gpio_config()` 之后立刻采初值** → 连采到"连续 10 次不变"（最多 100ms） | 引脚那一刻还没稳 → 读到低 → `last_settled` 记成"按下" → 等它稳下来触发一次边沿 → **误报一条"释放"**。实测：开机 2.4s、用户没碰按键就冒出 `[按键] 录音键 松开 → voice_stop` |
+| 🐛 **`handle_data` 把每条消息拷到 1KB 栈缓冲，超出就截断** → 改成**在 `m_rx_buf` 里就地分发** | 截断后 `cJSON_Parse` 失败 → **整条消息被静默丢弃**。V2 下 LLM 的 `reply` 可带 2KB 正文 → 必炸。做法：临时把下一个字节改 `\0`、分发完改回（`cJSON_Parse` 内部会复制，安全）。**副产品：给 `websocket_task` 的 4K 栈省掉 1KB** |
+| 🐛 **`voice_session` 的"等连接"循环（最长 15 秒）不消费 `voice_q`** → 抽 `voice_q_drain()` 并在所有等待循环里调用 | 期间 `voice_task` 是 `voice_q` 唯一消费者，一不消费：① 深度只有 4，按几次就满；② **`VOICE_STOP` 也一起丢 → 用户松手被忽略** → 连上后照常录一段用户不要的会话。实测踩过开机 2.4s 打出 `voice_q 满, VOICE_STOP 丢弃` |
 
 ### 已确认可用的重载/配置
 
-- `ui_chat` 屏**已有现成对话控件**：`ui_metext`（我说的，绿气泡）/ `ui_restext`（回复，深色气泡）——微信式布局已画好，等接数据。
+- `ui_chat` 屏的控件树（**本轮用户重新设计过**，见 §6-F）：`ui_contextpanel`(flex column 容器)
+  下挂**每轮新建**的 `roll`→`panel`→`label` 三层。**SquareLine 预置的 `ui_merollpanel`("你好") /
+  `ui_resrollpane`("hello") 是模板，会被代码在进屏时删掉** —— 别以为屏幕上那两条是真实消息。
+- `ui_TabView3`("choose model") 已加 `LV_OBJ_FLAG_HIDDEN`（隐藏对象不参与布局也不绘制）。
 - 图片素材两类格式：**I8 索引**（图标/logo）与 **RGB565A8**（大图）。I8 需开 `CONFIG_LV_BIN_DECODER_RAM_LOAD=y` 才能显示（已开）。
 
 ---
@@ -377,18 +549,20 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 | 文件 | 内容 | 状态 |
 |---|---|---|
 | **`HANDOFF.md`** | ← 本文件，接手入口 | 最新 |
-| [`REBUILD.md`](REBUILD.md) | **重构完整方案**（双通道队列/任务布局/阶段/消息结构/4 大坑/分工） | 最新，当前计划 |
+| ★★ [`PROTOCOL.md`](PROTOCOL.md) | **协议 V2 完整规范**（ASR 全量 `asr` / `partial` 归 LLM / 网关侧要改什么 / 内存账） | **新增，改协议前必读** |
+| [`REBUILD.md`](REBUILD.md) | **重构完整方案**（双通道队列/任务布局/阶段/消息结构/4 大坑/分工） | ✅ **已同步到 V2** |
 | `drivers/gpio_isr_once.hpp` | GPIO ISR 服务"只装一次"helper（消除启动日志里的误导性 `E`） | 新增 |
 | [`APP_FSM.md`](APP_FSM.md) | **旧**状态机工作逻辑详解（`AppFsm` 的 tick 七步、WS 回调分发表） | 描述**重构前**的架构，供理解历史 |
-| [`APIserver.md`](APIserver.md) | 服务器端 WS 协议说明 | 参考 |
+| [`APIserver.md`](APIserver.md) | 服务器端 WS 协议说明（V1.5）| ⚠️ **已被 `PROTOCOL.md` 取代**，顶部有指向说明 |
 | `problem.md` / `STACK_OVERFLOW.md` | 历史问题记录（栈溢出等） | 历史 |
 | `README.md` | 项目说明 | 可能过时 |
-| **`AGENTS.md`** | 项目指南 | ⚠️ **信息过时**（称 v6.0.1/2MB flash/无 PSRAM/main.c 为空），**以本文件 §2 为准** |
+| **`AGENTS.md`** | 项目指南（在仓库根，不在 `MD/`）| ⚠️ **信息过时**（称 v6.0.1/2MB flash/无 PSRAM/main.c 为空，且 §2 的按键引脚还是旧的），**以本文件 §2 为准** |
 
 ### 记忆文件（不在仓库，在用户机器上）
 
 - `C:\Users\30709\.claude\projects\D--Desktop-ESP-IDF-Lanlink\memory\`
-  - `psram-80mhz-unstable.md` —— PSRAM 80MHz 位翻转记录（见下方风险）
+  - `psram-80mhz-unstable.md` —— PSRAM 80MHz 位翻转记录
+    ⚠️ **该结论方向待重新评估**：本轮发现接地不良也能造成随机位翻转（见 §9 顶部）。
 
 ---
 
@@ -397,6 +571,10 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
 - ⚠️ **PSRAM 80MHz 曾有位翻转记录**（旧记录称是音频错字根因），但当时屏幕引脚 35/36/37 正压着 PSRAM 数据线。
   重接线后雪花消失，故判断是**接线冲突**，当前已改回 80MHz。
   `CONFIG_SPIRAM_MEMTEST=y` 保留作开机自检兜底 —— **若启动 abort，说明该判断有误，需回退 40MHz**。
+- ★★ **待重新评估：上面那条"PSRAM 位翻转"的结论方向可能是错的。**
+  本轮发现**接地不良**（§5.0-A）能让整块板的地平面靠 GPIO 的 ESD 二极管维持 ——
+  一个漂移的地平面同样能造成随机位翻转。**若当时也是接地问题，那这个锅就不该由 PSRAM 背。**
+  下次再遇到位翻转/随机崩溃，**先量"板子 GND 引脚 ↔ 面包板 GND 轨"之间的电压**（应在几 mV 以内）。
 - ⚠️ `main/CMakeLists.txt` 用 `SRC_DIRS` + glob：**每次新增源文件都要 touch 它**（见 §6）。
 - 📌 **阶段 1 收尾已完成**：`diag_task` 与全部临时诊断接口（`encoder_isr_hits` / `encoder_peek_raw` /
   `button_edge_isr_hits` / `button_edge_timer_hits` / `lvgl_encoder_*`）已删除；
@@ -404,29 +582,38 @@ b->last_settled = (gpio_get_level(pin) == active_level);  // 隔几微秒就读
   `lcd_display.hpp` 过时引脚注释与无用的 `ENC_A_PIN` 宏已清理；
   `lvgl_port_send_encoder_dir()` 与 `encoder_dir_t` 死代码已删除。
   **输入链路若再出问题，诊断需重新添加**（照 §5.2 末尾的"教训"写）。
-- 📌 **阶段 0 / 1 / 2 已完成并上机验证**（构建通过；建连+切 text；IO10 走完 start→end；
-  跨任务队列链路打通）。回归验证清单（下次改动后照此看串口）：
+- 📌 **阶段 0 / 1 / 2 / 3 已完成并上机验证**。回归验证清单（下次改动后照此看串口）：
   1. 构建过；串口**无** `handler 表已满`（实测只需 3 个 handler 位，表深 4）
-  2. `ui_bridge: 就绪: voice_q=4 resp_q=16 stream_q=1 (共约 8932 字节内部 SRAM)`
-     ← **8932 这个数是"消息结构没被改坏"的硬指标**，改 `resp_msg_t`/union 后必须对照
-  3. `ui_bridge: [结果] kind=2 ... status=0`（`RESP_WS_STATUS` + `CONNECTED`）
+  2. `ui_bridge: 就绪: voice_q=4 resp_q=16 stream_q=1 (共约 3304 字节内部 SRAM)`
+     ← **这个数是"消息结构没被改坏"的硬指标**，改 `resp_msg_t`/union/`BUS_TEXT_LEN*` 后必须对照。
+     （V1 是 8932，V2 缩到 3304，见 §6-A）
+  3. `ui_bridge: [连接] ... status=0`（`RESP_WS_STATUS` + `CONNECTED`）
   4. `ws_keeper: 网关已连接 (服务由 voice_task 在会话开头切换)`
   5. **阶段 1 无回归**：转编码器仍切屏、按键仍一次一沿、**无 Task WDT**
-  6. 按 IO10 → `status=3`(STARTED) → `voice: 服务器已确认切到 text` → `已发送 start`
-     → `采音开始 (每帧 1280 字节 / 40ms)` → 松开 → `会话结束 (正常), 共发 N 帧` → `status=4`(ENDED)
-     （`N ≈ 按住秒数 × 25`，因为每帧 40ms）
-  7. 按 IO8 → **只有** `[按键] 服务键 按下 (IO8 未接业务)`，**不投任何队列**
-  8. 拔网线 → `status=1`(DISCONNECTED) → `status=2`(RECONNECTING) → 插回 → `status=0`(CONNECTED)
-  9. **快速点按**（按下即松）→ `voice: 等 svc_ok 期间用户已松手 (快速点按), 本轮取消`，不崩、不留残留会话
-  10. `voice: level=xxx` —— 每次会话每秒一条，用于标定 `VOICE_SPEECH_LEVEL`（见 §6 音量那段）
-- 📌 **阶段 3 进行中**：**真采音循环已写完**（`voice_session`：等连接 → 切 text + 等 svc_ok → asr.start
-  → mic.start → 采音循环 → mic.stop + asr.end）。剩下的是 **UI 上屏**（还没做）：
-  把 `drain_queues()` 里的 log 换成真正的 `switch (r.kind)`（那个 if/else 就是雏形），
-  `stream_q` → 流式冒字，`RESP_ASR_FINAL` → 定格。
-  以及**待标定后接线**的"服务器无响应判定"（逻辑已写在 `voice.cpp:44-62` 注释里，
-  只差阈值 + `UiBridge::asr_last_ms()`）。
-- 📌 **阶段 4 待做（清理）**：`rtasr.cpp` 里 `printf` 在 WS 回调(持 `client->lock`)里跑，
-  网络抖动时可能拖住发音频 → 降级为 `ESP_LOGD`；`queue` 是否改 `xQueueCreateStatic` + PSRAM。
+  6. 按**录音键（GPIO2）** → `[会话] status=3`(STARTED) → **聊天屏立刻冒出一个小绿气泡**
+     → `voice: 服务器已确认切到 text` → `已发送 start` → `采音开始 (每帧 1280 字节 / 40ms)`
+     → 说话 → `[流式] kind=0 final=0 text="..."` **逐步变长（全量替换，不重复叠加）**
+     → 松开 → `[流式] ... final=1` 整句完整 → `[上屏] 定格: ... (PSRAM 空闲 XXXX KB)`
+     → `[会话] status=4`(ENDED)
+  7. **按下后立刻松开**（不说话）→ 小绿气泡出现后**自己消失**（空气泡被删）
+  8. 按**服务键（GPIO42）** → 只有一条日志，**不投任何队列**
+  9. 拔网线 → `status=1`(DISCONNECTED) → `status=2`(RECONNECTING) → 插回 → `status=0`(CONNECTED)
+     **待实测**：拔网线录音 → ABORTED + `ws_keeper` 重连 → 再按可开新会话
+  10. **快速点按**（按下即松）→ `voice: 等 svc_ok 期间用户已松手 (快速点按), 本轮取消`，不崩、不留残留会话
+  11. **待实测**：按住录音键**超过 50 秒**不说话 → `已达单轮上限 50 秒, 自动收尾` → 仍能收到 `final`
+  12. **待实测**：录音过程中转编码器 —— UI 是否仍不卡
+  13. `voice: level=xxx | 本秒 发送=25 读失败=0 ...` —— 每秒一条，**健康值判读见 §6-H**；
+      同时用于标定 `VOICE_SPEECH_LEVEL`
+- 📌 **阶段 3 已完成**（真采音 + 上屏都做完了，见 §3 各阶段成果）。**遗留一项未接线**：
+  "服务器无响应判定"（逻辑已写在 `voice.cpp` 注释里，只差 `VOICE_SPEECH_LEVEL` 阈值标定
+  + `UiBridge::asr_last_ms()`）。
+- 📌 **阶段 4 待做（清理加固）**：
+  - `rtasr.cpp` 的 `printf` **已降级为 `ESP_LOGD`** ✓（本轮做完）
+  - `queue` 是否改 `xQueueCreateStatic` + PSRAM（现在只有 3304 B，优先级已降低）
+  - `UiBridge` 拆分（总线层 / 映射层）—— 上屏代码进来后 `ui_bridge.cpp` 变长了
+  - **渲染提速**（见文末"UI 性能"）
+  - 删留档代码（`app_fsm.*.txt` / `button.*.txt`）
+  - ✅ **已做完**：`HANDOFF.md` / `REBUILD.md` / `PROTOCOL.md` 的 V2 同步
 - 📌 **已知行为（未改，用户明确要求先不动）**：`lv_indev_read()` 在屏幕动画期间
   （`prev_scr != NULL`，约 500ms）会在调 `read_cb` **之前** return，所以动画期间转的跳变会
   **攒在 `s_accum` 里**，动画结束后一次结算 → `enc_diff` 可能是十几格 → `indev_encoder_proc`

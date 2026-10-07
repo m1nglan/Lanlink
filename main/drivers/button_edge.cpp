@@ -34,32 +34,23 @@ uint32_t button_edge_isr_count(void)
     return s_isr_cnt;
 }
 
-/* 中断: 任意边沿都进来, 只重启消抖 timer (推迟上报, 直到电平稳定)。
- * 注意: esp_timer_restart 对"未启动"的 timer 会返回 INVALID_STATE 且不启动它,
- * 故首次边沿必须用 start_once 启动; 之后 restart 推迟。
- * 两者都 IRAM 安全(内部 portENTER_CRITICAL_SAFE), 可在 ISR 调用。 */
+/* [链] GPIO双边沿中断 → 【button_edge_isr】 → (一次消抖timer 50ms) button_edge_timer_cb
+ *      → 电平变化才回调 → on_button_edge(main.cpp)
+ *
+ * 任意边沿都进来, 只重启消抖 timer (推迟上报, 直到电平稳定)。
+ * ★ 首次边沿必须 start_once: esp_timer_restart 对"未启动"的 timer 返回 INVALID_STATE
+ *   且不会启动它。两者都 IRAM 安全(内部 portENTER_CRITICAL_SAFE)。 */
 static void IRAM_ATTR button_edge_isr(void *arg)
 {
     btn_edge_t *b = (btn_edge_t *)arg;
 
     s_isr_cnt++;                            /* 诊断计数 (ISR 里只做 ++, 很便宜) */
 
-    /* ★★ 限流: 同一个 tick(10ms @HZ=100) 内只做一次。
-     *
-     *   esp_timer_restart 从 ISR 里调【安全但不轻】—— 读 esp_timer.c:135-177:
-     *     timer_list_lock()                 → portENTER_CRITICAL_SAFE (屏蔽中断)
-     *     esp_timer_impl_get_time()         → 读 systimer + 64 位乘除
-     *     timer_remove()                    → ★ 从有序链表里摘出来 (遍历)
-     *     timer_insert()                    → ★ 再遍历一次找位置插回去
-     *     timer_list_unlock()               → 恢复中断
-     *
-     *   按键抖动/引脚噪声时 ISR 会被反复重入, 每次都要屏蔽一遍中断 →
-     *   CPU0 几乎 100% 泡在这个 ISR 里 → 中断看门狗(300ms)永远轮不上 →
-     *   "Interrupt wdt timeout on CPU0"。
-     *   (实测 backtrace 就停在本函数里: button_edge_isr → esp_timer_restart。)
-     *
-     *   限流后最多 100 次/秒, 对 50ms 消抖完全够用。
-     *   xTaskGetTickCountFromISR 只是读个变量, 比 esp_timer_restart 便宜几个数量级。 */
+    /* ★★ 限流: 同一个 tick(10ms @HZ=100)内只做一次。
+     *   esp_timer_restart 从 ISR 调【安全但不轻】—— 屏蔽中断 + 两次有序链表遍历
+     *   (esp_timer.c:135-177)。抖动/引脚噪声时 ISR 反复重入 → CPU0 全泡在这里
+     *   → 中断看门狗(300ms)轮不上 → "Interrupt wdt timeout on CPU0"。
+     *   限流后最多 100 次/秒, 对 50ms 消抖完全够。详见 MD/HANDOFF.md §5.0② */
     uint32_t now = xTaskGetTickCountFromISR();
     if (now == b->last_edge_tick) {
         return;
@@ -81,9 +72,8 @@ static void button_edge_timer_cb(void *arg)
     if (pressed != b->last_settled) {
         b->last_settled = pressed;
 
-        /* ★ 把"距上次上报期间来了多少次中断"一起打出来 —— 一眼看出有没有抖动风暴:
-         *   正常一次按键 = 几次~几十次; 几百/几千 = 引脚在噪声里翻转
-         *   (接触不良/悬空/上拉没接上), 会引发 ISR 风暴 → 中断看门狗 panic。 */
+        /* ★ "距上次上报期间来了多少次中断" —— 一眼看出有没有抖动风暴:
+         *   几百/几千 = 引脚在噪声里翻转(接触不良/悬空) → ISR 风暴 → panic。 */
         uint32_t isr_now = s_isr_cnt;
         ESP_LOGI(TAG, "GPIO%d %s (期间中断 %u 次, 累计 %u)",
                  b->pin, pressed ? "按下" : "释放",
@@ -134,15 +124,10 @@ esp_err_t button_edge_init(gpio_num_t pin, int active_level, btn_edge_cb_t cb, v
     }
 
     /* 3. 记录初始稳定状态 (避免上电首帧误报边沿)
-     *
-     * ★★ 不能刚 gpio_config 就立刻采初值:
-     *   上拉刚使能 / 面包板接触 / 外部噪声 —— 引脚那一刻可能还没稳。
-     *   此刻读到低 → last_settled 被记成"按下" → 等它稳下来触发一次边沿,
-     *   消抖后对比发现变了 → 【误报一条"释放"】。
-     *   实测踩过: 开机 2.4 秒、用户没碰按键, 冒出 "[按键] 录音键 松开 → voice_stop"
-     *   (而这个假"松开"还会把 voice_q 里的 VOICE_STOP 语义搅乱)。
-     *
-     *   连采到"连续 10 次不变"为止 (最多 100ms) 再定初值。 */
+     * ★★ 不能刚 gpio_config 就立刻采初值: 上拉刚使能/面包板接触/外部噪声 ——
+     *    那一刻引脚可能还没稳, 读到低就被记成"按下", 等它稳下来触发边沿 →
+     *    【误报一条"释放"】(实测: 开机 2.4s 没人碰按键却冒出"录音键 松开")。
+     *    连采到"连续 10 次不变"(最多 100ms)再定初值。详见 MD/HANDOFF.md §5.0① */
     int stable = gpio_get_level(pin);
     for (int i = 0; i < 10; i++) {
         vTaskDelay(pdMS_TO_TICKS(10));

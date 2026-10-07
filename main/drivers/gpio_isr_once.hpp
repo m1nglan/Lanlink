@@ -4,21 +4,14 @@
 #include "driver/gpio.h"
 
 /* ================================================================
- * GPIO 中断服务: 全芯片唯一资源, 只能成功安装一次
+ * [链] (encoder_init | button_edge_init) → 【gpio_isr_service_ensure】 → 中断服务就绪
  *
- * 问题: encoder 和 button_edge 都需要 GPIO 中断, 各自调一次
- *       gpio_install_isr_service() 时, 第二次会被 IDF 判为
- *       "GPIO isr service already installed" (gpio.c:537)
- *       并打出一条 **ESP_LOGE → E 级日志**。
- *       调用方虽然能靠 ESP_ERR_INVALID_STATE 容忍, 但启动日志里出现
- *       一条 E 会误导后续排查(看着像启动出错, 其实完全正常)。
- *
- * 方案: 两个驱动统一走本 helper。谁先调谁装, 后调的直接返回 ESP_OK,
- *       不再产生那条 E。函数内 static 在 C++ 里保证**全程序唯一实例**
- *       (即使本 inline 函数被内联进多个 .cpp), 所以不依赖各驱动的
- *       初始化顺序 —— 谁先谁后都对。
- *
- * 注意: 只在初始化阶段(单线程)调用, 未加锁。
+ * GPIO 中断服务是全芯片唯一资源, 只能成功安装一次。encoder 和 button_edge 都要装
+ * → 第二次会被 IDF 判为 "already installed" (gpio.c:537) 并打一条 **E 级日志**,
+ *   看着像启动出错其实完全正常, 会误导排查 → 统一走本 helper 消掉它。
+ * ★ 函数内 static 在 C++ 里保证全程序唯一实例(即使 inline 被内联进多个 .cpp),
+ *   所以不依赖两个驱动谁先初始化。
+ * ⚠️ 只在初始化阶段(单线程)调用, 未加锁。
  * ================================================================ */
 
 /*! 确保 GPIO ISR 服务已安装(幂等)。返回 ESP_OK 表示"服务可用"。 */

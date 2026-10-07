@@ -3,17 +3,14 @@
 #include "esp_err.h"
 
 /* ================================================================
- * voice —— 命令驱动的语音会话任务 (取代旧 i2s_task + ws_task 里的录音部分)
- *
- * 常驻, 但**空闲时阻塞在 voice_q 上**(portMAX_DELAY) → 零 CPU 占用。
- * 不是轮询: 由按键回调 xQueueSend 唤醒。
- *
- * 会话结构 (真采音):
- *   等连接 → 切 text + 等 svc_ok → asr.start → mic.start
- *     → 循环 { mic.read_frame(40ms) → 帧头 peek STOP/断线 → asr.send_audio }
- *     → mic.stop + asr.end → 回队列睡
- *
- * ⚠️ I2S 通道由 voice_task **启动时建一次**(init, 较重), 每轮会话只 start/stop。
+ * voice —— 命令驱动的语音会话任务 (取代旧 i2s_task + ws_task 的录音部分)
+ * [链] 按键GPIO中断 → button_edge_isr → button_edge_timer_cb → on_button_edge
+ *      → UiBridge::voice_start → voice_q →【voice_task】→ voice_session
+ *        → I2sMic::read_frame / RtAsr::send_audio → WS → 网关
+ * 常驻但空闲时阻塞在 voice_q 上 (portMAX_DELAY) → 零 CPU, 不是轮询。
+ * 会话结构: 等连接 → 切 text + 等 svc_ok → asr.start → mic.start
+ *           → 循环{读帧 → peek STOP/断线/超时 → 发包} → mic.stop + asr.end
+ * ⚠️ I2S 通道由本任务启动时建一次, 每轮会话只 start/stop。
  * ⚠️ 全机唯一采音者就是本任务 —— i2s_mic 的读缓冲是 static, 只能有一个读者。
  * ================================================================ */
 

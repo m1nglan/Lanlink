@@ -19,21 +19,23 @@
 static const char *TAG = "Main";
 
 /* ================================================================
- * 阶段 2: WiFi + WS 长连接 + 事件驱动调度层
+ * app_main: 屏幕 → 输入 → WiFi → 业务总线 → 业务任务
  *
- * 自建任务一共 3 个 (对比重构前的 4 个 + 状态机轮询):
- *   lvgl       CPU1 prio2 6K   渲染 + 编码器 indev + UI 队列消费
- *   ws_keeper  CPU0 prio5 8K   WS 连接生命周期: 建连/重连/保活/切 text
- *   voice      CPU0 prio6 6K   命令驱动语音会话 (本阶段为假会话, 不采音)
- *   ── 另有组件自带的 websocket_task (CPU0 prio5, 在 ws.cpp::init 里钉核)
+ * [链] app_main → lvgl_port_init ─┬─ lcd_panel_init → ST7789 + 背光先关
+ *                                 └─ lv_init + display + flush_cb + tick + lvgl 任务
+ *      → ui_init → 背光开 → encoder_init → indev 注册 → 按键中断 ×2
+ *      → WiFi::init (阻塞) → UiBridge::init (建队列) → start_ui_timer
+ *      → ws_keeper_start → voice_task_start
  *
- * 输入 (无任务):
- *   按键   → GPIO 中断 + esp_timer 消抖 → 回调里投 voice_q
- *   编码器 → GPIO 中断 + 累加器 → LVGL indev 在自己的 timer 里消费
+ * 自建任务 3 个 (+ 组件自带的 websocket_task): 2026 版已去轮询化
+ *   lvgl       CPU1 prio2 6K   lv_timer_handler + 编码器 indev + 消费队列上屏
+ *   ws_keeper  CPU0 prio5 8K   WS 连接生命周期: 建连/重连/保活
+ *   voice      CPU0 prio6 6K   命令驱动语音会话 (真采音)
+ *   websocket  CPU0 prio5 4K   组件自带 (ws.cpp::init 里钉核) —— 回调在此上下文跑
  *
- * 数据流 (跨任务全部走队列; 发送则是同步函数调用):
- *   按键 → voice_q → voice_task → asr.start/send_audio/end ──> 服务器
- *   服务器 ──> websocket_task(回调) → resp_q/stream_q → lvgl 任务上屏
+ * 无任务的输入: 按键 = GPIO中断 + esp_timer 消抖 → 投 voice_q;
+ *               编码器 = GPIO中断 + 累加器 → LVGL indev 在 lv_timer_handler 里消费
+ * 数据流: 按键 → voice_q → voice_task → ASR;  服务器 → resp_q/stream_q → lvgl 上屏
  * ================================================================ */
 
 /* 按键引脚 */
@@ -60,14 +62,17 @@ static void on_button_edge(void *ctx, gpio_num_t pin, bool pressed)
             UiBridge::get().voice_stop();
         }
     } else if (pin == BTN_SVC_PIN) {
-        /* IO8: 本阶段只打日志、不投任何队列 (服务切换业务未定) */
-        ESP_LOGI(TAG, "[按键] 服务键 %s (IO8 未接业务)", pressed ? "按下" : "松开");
+        /* 服务键: 本阶段只打日志、不投任何队列 (服务切换业务未定)
+         * ★ 日志里用 %d 打印真实 GPIO 号 (从 BTN_SVC_PIN 取), 别写死 "IO8" ——
+         *   引脚改过一次 (IO8 → GPIO42), 写死的数字会跟着过时, 排查时误导人。 */
+        ESP_LOGI(TAG, "[按键] 服务键(IO%d) %s (未接业务)",
+                 (int)BTN_SVC_PIN, pressed ? "按下" : "松开");
     }
 }
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "========= Lanlink 阶段2: 事件驱动调度层 =========");
+    ESP_LOGI(TAG, "========= Lanlink: 事件驱动调度层 (阶段 0-3 已完成) =========");
     ESP_LOGI(TAG, "空闲堆: %u 字节", (unsigned)esp_get_free_heap_size());
 
     /* ---- 1. 屏幕: LCD + LVGL 9.5 + SquareLine UI ---- */
@@ -106,7 +111,8 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(ws_keeper_start());
     ESP_ERROR_CHECK(voice_task_start());
 
-    ESP_LOGI(TAG, "初始化完成: 转编码器切屏 | 按 IO10 走一轮语音会话 | 按 IO8 见钩子日志");
+    ESP_LOGI(TAG, "初始化完成: 转编码器切屏 | 按 IO%d 走一轮语音会话 | 按 IO%d 见钩子日志",
+             (int)BTN_REC_PIN, (int)BTN_SVC_PIN);
     ESP_LOGI(TAG, "空闲堆(初始化后): %u 字节", (unsigned)esp_get_free_heap_size());
 
     /* app_main 自身已无用, 删除释放栈 */

@@ -17,24 +17,18 @@ typedef void (*llm_reply_cb_t)(const char *text, void *user_ctx);
 typedef void (*llm_stream_cb_t)(const char *text, bool is_final, void *user_ctx);
 
 /* ================================================================
- * Llm: 大模型对话(llm / openclaw)业务驱动  —— V2 协议 (见 PROTOCOL.md)
+ * Llm: 大模型对话(llm / openclaw)驱动  —— V2 协议, 详见 MD/PROTOCOL.md
  *
- * 用 switch_service() 参数切换两个服务:
- *   - "llm":      DeepSeek, 网关维护上下文
- *   - "openclaw": 转发明岚对话
+ * [链] websocket_task → WS::dispatch_msg → 【handle_partial / handle_reply】
+ *      → [回调] set_stream_callback → UiBridge → stream_q → 气泡
  *
- * ★ V2: 网关对 LLM 仍发**增量**({"type":"partial"}), 但
- *   **累积在驱动侧做完**, 交给 set_stream_callback 的永远是【完整回复】。
- *   理由见 llm.cpp 顶部注释 (核心: 总线上的 stream_q 是覆盖式, 放增量会丢字)。
+ * ★★ 网关对 LLM 仍发**增量**("partial"), 但**累积在驱动侧(WS 回调里)做完**,
+ *    交给 set_stream_callback 的永远是【完整回复】。
+ *    不能在 UI 侧累积: stream_q 是深度 1 覆盖式, UI 每 ~137ms 才取一次, 放增量会丢字。
+ *    (与 RtAsr 的差别只是"谁做累积": ASR 是网关做, LLM 是板子做。)
  *
- * 使用示例:
- *   WS::get().init();
- *   Llm llm;
- *   llm.attach(WS::get());
- *   llm.set_stream_callback(cb, NULL);    // cb(text, is_final, ctx)
- *   llm.switch_service("llm", 1000);      // 切到 DeepSeek
- *   llm.chat("记作业:数学第3页", 1000);     // 发对话
- *   llm.clear(1000);                       // 清空上下文
+ * 用法: llm.attach(WS::get());  llm.set_stream_callback(cb, NULL);
+ *       llm.switch_service("llm", 1000);  llm.chat("...", 1000);
  * ================================================================ */
 class Llm {
 public:

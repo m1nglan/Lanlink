@@ -11,10 +11,8 @@
 static const char *TAG = "ws_keeper";
 
 /* ---------------- 任务参数 ----------------
- * ★ 核选择: 必须与 websocket_task 同核(CPU0)。
- *   组件 TX/RX 共用一把 client->lock (CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK 未开),
- *   同核能把抢锁退化成核内短临界区, 跨核则会带上缓存同步开销。
- *   核号在 ws.cpp::init() 里通过 task_core_id_set/task_core_id 设定。 */
+ * ★ 核选择: 必须与 websocket_task 同核(CPU0) —— TX/RX 共用一把 client->lock
+ *   (CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK 未开), 同核把抢锁退化成核内短临界区。 */
 #define WS_KEEPER_TASK_STACK   (8 * 1024)
 #define WS_KEEPER_TASK_PRIO    (5)
 #define WS_KEEPER_TASK_CORE    (0)
@@ -73,13 +71,11 @@ static void ws_keeper_task(void *arg)
                 continue;
             }
 
-            /* ★ 这里**故意不切服务** (以前重连后会 ws.set_service + asr.switch_service)。
-             *   那是旧调度器留下的补丁: 轮询式 FSM 里可能出现"语音已经过去了,
-             *   但服务还没切"。现在切服务和发 start 都在 voice_task 里顺序执行,
-             *   中间还隔着 svc_ok 握手 → 那个场景不可能发生了。
-             *   顺带好处: ws_keeper 不再产生 svc_ok → VOICE_SVC_ACKED 的唯一生产者
-             *   就是 voice_session 自己, 不会被重连的确认误唤醒。
-             *   路由用的 WS::m_service 默认值就是 "text" (ws.hpp), 不用设。 */
+            /* ★★ 这里**故意不切服务** (旧代码重连后会 set_service + switch_service)。
+             *   那是轮询式 FSM 的补丁: 怕"语音已经过去了但服务还没切"。现在切服务和
+             *   发 start 都在 voice_task 里顺序执行、中间隔 svc_ok 握手 → 不可能发生。
+             *   顺带好处: VOICE_SVC_ACKED 的唯一生产者变成 voice_session 自己,
+             *   不会被重连的确认误唤醒。路由用的 WS::m_service 默认就是 "text"。 */
 
             last_ping_ms  = now_ms();
             was_connected = true;

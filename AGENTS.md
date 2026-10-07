@@ -1,7 +1,7 @@
 # Lanlink 项目指南 (ESP32-S3 / ESP-IDF)
 
-> **接手项目请先读 [`HANDOFF.md`](HANDOFF.md)** —— 那里有当前状态、正在排查的问题、源码级验证过的坑。
-> 本文件只放长期有效的环境与约定。
+> **接手项目请先读 [`MD/HANDOFF.md`](MD/HANDOFF.md)** —— 那里有当前状态、正在排查的问题、源码级验证过的坑。
+> 协议细节看 [`MD/PROTOCOL.md`](MD/PROTOCOL.md)。本文件只放长期有效的环境与约定。
 
 ## 项目概述
 
@@ -21,12 +21,33 @@ INMP441 麦克风 → I2S → WiFi → WebSocket → 服务器（讯飞 RTASR / 
 | PSRAM | Octal **80MHz** 已启用（有历史位翻转记录，见 HANDOFF §9） |
 | 构建/烧录 | **用户自行执行**，不要代为 build/flash |
 
-### 引脚（勿与 PSRAM 冲突）
+### 引脚（★★ 以代码为准 —— 排查硬件前必须先对一遍代码）
 
-屏幕 SPI2: SCLK=21 MOSI=20 RST=19 DC=47 CS=48 BL=45 ｜ 编码器: A=7 B=15
-物理键: IO10(录音) IO8(服务) ｜ I2S: BCLK=11 WS=12 DIN=13
+> ⚠️ **本节已于最近一次接线变更后按代码逐项核实。**
+> **原始定义位置见每行末尾** —— 遇到"引脚行为诡异"（上电拉低 / 误触发 / 无反应），
+> **第一步就是打开这些头文件对一遍实际连线**，别信记忆、别信旧文档。
+> 一键列全部引脚：在 `main/` 里搜 `GPIO_NUM_`。
 
-⚠️ **n16r8 的 Octal PSRAM 占 GPIO33–37，外设绝不能用这几个脚。**
+| 外设 | 引脚 | 定义位置 |
+|---|---|---|
+| **ST7789 屏**（SPI2）| SCLK **9** ｜ MOSI **46** ｜ RST **3** ｜ DC **8** ｜ CS **18** ｜ BL **17** | `main/display/lcd_display.hpp:21-26` |
+| **旋转编码器** | A **45**（"左"）｜ B **41**（"右"）| `main/drivers/encoder.hpp:22-23` |
+| **物理按键** | 录音 **2** ｜ 服务 **42**（均**按下为低、内部上拉**）| `main/main.cpp:40-41` |
+| **INMP441 麦克风**（I2S）| BCLK **21** ｜ WS **47** ｜ DIN **1** | `main/drivers/i2s_mic.hpp:29-31` |
+
+⚠️ **n16r8 的 Octal PSRAM 占 GPIO33–37，外设绝不能用这几个脚。**（上表没用到 ✓）
+
+⚠️ **用到了几个"特殊脚"，合法但必须知道：**
+
+| 脚 | 特殊之处 | 用在哪 |
+|---|---|---|
+| **GPIO45 / GPIO46** | **strapping 脚**（VDD_SPI 电压 / ROM 打印）| 编码器 A、屏 MOSI |
+| **GPIO3** | **strapping 脚**（JTAG 源选择）| 屏 RST |
+| **GPIO39–42** | **JTAG 默认功能**（MTCK/MTDO/MTDI/MTMS）| 编码器 B=41、服务键=42 |
+
+- 当普通 GPIO 用**没问题**（前提是**不接 JTAG 调试**，且别在启动早期依赖它们的电平）
+- **但它们上电瞬间有默认电平** → 将来若再遇到"**开机头几秒引脚状态异常**"（拉低 / 误报按下 / ISR 风暴），**先怀疑这几个**
+- 📌 历史上踩过一次"开机 4 秒内 3.3V 引脚被拉低 → 按键误报松开 + ISR 风暴"，**真根因是接地**（不是这些脚），见 [`MD/HANDOFF.md`](MD/HANDOFF.md) §5.0-A
 
 ## 构建与运行
 
@@ -58,6 +79,13 @@ idf.py flash monitor
 6. **`_Atomic` 是 C11，C++ 不认** —— 用 `std::atomic` 或 `portMUX_TYPE` 临界区；
    且 ISR 内优先用 `portENTER_CRITICAL_ISR`（`std::atomic` 在 Xtensa 不保证无锁）
 7. `sdkconfig` 已被 `.gitignore` 忽略，不入库；改配置需重新构建
+8. **★ SquareLine 导出的中文字体可能是【压缩】的** —— 看 `main/lvgl/fonts/ui_font_*.c` 里的
+   `.bitmap_format`：`1` = 压缩，需要 `CONFIG_LV_USE_FONT_COMPRESSED=y`（**已在 `sdkconfig` +
+   `sdkconfig.defaults` 里开着**）；`0` = 明文，不需要。
+   ⚠️ **症状很坑**：字体压缩但没开解压器时，LVGL 的**度量**照常读（`glyph_dsc`）、**像素**直接
+   `return NULL`（`lv_font_fmt_txt.c`）→ **框的长度对、字一个都不画**。
+   ⚠️ 文件头 `Opts:` 里的 `--no-compress` **是假的**，**以 `.bitmap_format` 为准**。
+   详见 [`MD/HANDOFF.md`](MD/HANDOFF.md) §6-C。
 
 ## 测试与验证
 

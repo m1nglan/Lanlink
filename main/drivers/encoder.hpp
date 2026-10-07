@@ -6,16 +6,12 @@
 #include "driver/gpio.h"
 
 /* ================================================================
- * 旋转编码器驱动 (正交 AB 相, 边沿中断 + 原子累加器, 单实例)
+ * [链] GPIO中断(A/B双相) → encoder_isr → s_accum → [lvgl任务] lvgl_encoder_read_cb
+ *      → data->enc_diff → LVGL → LV_KEY_LEFT/RIGHT → 聚焦对象 → 冒泡到屏 → 切屏回调
  *
- * 接线: 编码器 A 相 → GPIO7, B 相 → GPIO15 (公共端接 GND)
- *
- * 架构 (无任务, 无队列, 无回调):
- *   ISR 解出方向 → atomic 累加到 s_accum
- *   消费方(通常在 LVGL 的 indev read_cb 里)调 encoder_consume_raw() 取走净跳变
- *
- * 归一化: 一格 detent ≈ ENC_KEY_STEP 个状态跳变。消费方按此换算格数。
- * 若实际旋转方向与命名相反, 交换 ENC_PIN_A/ENC_PIN_B 即可。
+ * 正交 AB 相编码器: 无任务 / 无队列 / 无回调 —— ISR 解方向累加, 消费方主动取。
+ * 归一化: 一格 detent ≈ ENC_KEY_STEP 个状态跳变, 消费方按此换算格数。
+ * 方向反了就交换 ENC_PIN_A / ENC_PIN_B。
  * ================================================================ */
 
 /* ------------------ 参数 ------------------ */

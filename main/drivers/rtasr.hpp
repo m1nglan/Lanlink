@@ -10,19 +10,14 @@
 #include "drivers/ws.hpp"
 
 /* ================================================================
- * RtAsr: 语音听写(text 服务)业务驱动   —— V2 协议 (见 PROTOCOL.md)
+ * RtAsr: 语音听写(text 服务)驱动  —— V2 协议, 详见 MD/PROTOCOL.md
  *
- * 网关下发的流式消息是 **{"type":"asr","text":"<完整当前句>"}** —— 每次都是
- * 从头到现在的完整句, **不是增量**。所以本驱动收到就直接【整体替换】,
- * 不存在任何累积状态。
+ * [链] websocket_task → WS::dispatch_msg → 【handle_asr / handle_final】
+ *      → store_and_notify → [回调] UiBridge::on_asr_result → stream_q → 气泡
  *
- * 消息类型:
- *   asr    → handle_asr  (完整当前句, 覆盖)
- *   final  → handle_final(完整最终句, 覆盖 + 触发完成回调)
- *
- * ★ V1 的 "partial" 和 "revise" 已废除:
- *   - partial 现在只属于 llm/openclaw 服务
- *   - revise  因为 asr 每次都是全量(自带修正), 不再需要
+ * 网关每次下发都是【完整句】("asr" / "final"), **不是增量** → 本驱动【零累积】,
+ * 每次 strlcpy 整体替换。好处: 丢一条 / 乱序 / 重复 都不影响最终结果。
+ * (V1 的 partial / revise 已废除: partial 归 llm, revise 因 asr 自带修正而多余。)
  * ================================================================ */
 
 /* 识别结果回调(在 WS 消息分发上下文调用, 勿做阻塞操作)
@@ -31,17 +26,9 @@
  * user_ctx: 自定义参数 */
 typedef void (*rtasr_result_cb_t)(const char *text, bool is_final, void *user_ctx);
 
-/*!
- * 语音听写(text 服务)业务驱动,基于共享 WS 连接
- * 使用示例:
- *   WS::get().init();
- *   RtAsr asr;
- *   asr.attach(WS::get());
- *   asr.set_result_callback(cb, NULL);
- *   asr.start(1000);               // 发 {"type":"start"}
- *   asr.send_audio(pcm, 1280, 1000); // 发音频
- *   asr.end(1000);                 // 发 {"type":"end"}
- */
+/*! 语音听写(text 服务)驱动, 基于共享 WS 连接。
+ *  用法: asr.attach(WS::get());  asr.set_result_callback(cb, NULL);
+ *        asr.start(1000);  asr.send_audio(pcm, 1280, 1000);  asr.end(1000); */
 class RtAsr {
 public:
     void attach(WS &ws);                       /*!< 绑定共享连接, 注册 asr/final 处理器 */

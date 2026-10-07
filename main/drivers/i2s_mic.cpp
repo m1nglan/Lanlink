@@ -112,7 +112,7 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
     const size_t samples16 = byte_size / 2;                 /* int16 采样点个数 */
     const size_t raw_bytes = samples16 * sizeof(uint32_t);  /* 底层 32bit 槽位数据量 */
 
-    /* static 缓冲: 不在栈上,避免调用方(main 任务)栈溢出 */
+    /* static 缓冲: 不在栈上, 避免调用方栈溢出 (一个帧 2560 字节) */
     static uint32_t raw[I2S_MIC_FRAME_BYTES / 2];
 
     size_t bytes_read = 0;
@@ -135,7 +135,7 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
 }
 
 /* 一帧的平均绝对幅度 (0 ~ 32767)。纯计算, 不碰硬件。
- * 用途: 判"这一帧有没有声音" —— 用来区分"用户没说话"和"服务器没响应"。 */
+ * [链同] 用途: 判"这一帧有没有声音" —— 区分"用户没说话"和"服务器没响应"。 */
 int I2sMic::frame_level(const int16_t *pcm, size_t samples)
 {
     if (pcm == nullptr || samples == 0) {
