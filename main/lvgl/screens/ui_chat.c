@@ -42,12 +42,13 @@ void ui_chat_screen_init(void)
     lv_obj_set_style_bg_opa(ui_chat, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_top3 = lv_obj_create(ui_chat);
-    lv_obj_set_width(ui_top3, 333);
+    lv_obj_set_width(ui_top3, 320);
     lv_obj_set_height(ui_top3, 53);
     lv_obj_set_x(ui_top3, 0);
     lv_obj_set_y(ui_top3, -83);
     lv_obj_set_align(ui_top3, LV_ALIGN_CENTER);
     lv_obj_remove_flag(ui_top3, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_radius(ui_top3, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_contextpanel = lv_obj_create(ui_chat);
     lv_obj_set_width(ui_contextpanel, 320);
@@ -104,7 +105,6 @@ void ui_chat_screen_init(void)
     lv_obj_set_width(ui_metext, LV_SIZE_CONTENT);   /// 274
     lv_obj_set_height(ui_metext, LV_SIZE_CONTENT);    /// 33
     lv_label_set_text(ui_metext, "你好");
-    lv_obj_add_flag(ui_metext, LV_OBJ_FLAG_OVERFLOW_VISIBLE);     /// Flags
     lv_obj_set_style_text_color(ui_metext, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_metext, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_metext, &ui_font_ch14, LV_PART_MAIN | LV_STATE_DEFAULT);

@@ -263,6 +263,26 @@ static int       s_bubble_cnt = 0;
 /* "正在说"的那条 (流式期间反复改它的文字); 定格后置 NULL, 下一条新建 */
 static lv_obj_t *s_live_label = NULL;
 
+/* 上次记录的那些指针属于哪个 contextpanel —— 用来识别"聊天屏被销毁重建了" */
+static lv_obj_t *s_ctx_hooked = NULL;
+
+/* ★ 气泡文字要不要放 PSRAM?
+ *   1 = lv_label_set_text_static + 自己 heap_caps_malloc(MALLOC_CAP_SPIRAM)
+ *   0 = lv_label_set_text, 让 LVGL 拷到它自己的堆 (内部 SRAM) —— 和 SquareLine 一致
+ *
+ * ⚠️⚠️ 实测: 设成 1 时【气泡会变长但文字一个都不画】(占位空白)。
+ *     已排除字体 (换成 "你好" 也不显示; 字体是常用 7000 字, 且 .fallback=NULL 只是不兜底)。
+ *     set_text_internal 和 set_text_static 结尾都是同一句 lv_label_mark_need_refr_text,
+ *     渲染路径一样 → 问题在别处, 尚未定位。
+ *     所以先设 0 保证能用; 查清 static 路径再打开。
+ *
+ * 内存账 —— 为什么现在设 0 也没关系:
+ *   一条识别结果通常 20~40 个汉字 = 60~120 字节 (BUS_TEXT_LEN=2048 是极端上限);
+ *   10 条 ≈ 1~2 KB 内部 SRAM, 可以忽略。
+ *   真正需要 PSRAM 的是【LLM 长回复】(每条可能上千字节 → 10 条 20KB), 到那时再解决。 */
+#define CHAT_TEXT_IN_PSRAM  (0)
+
+#if CHAT_TEXT_IN_PSRAM
 /* 标签被删时, 释放我们自己分配的 PSRAM 文字副本。
  * ★ 必须自己管: lv_label_set_text_static 之后 LVGL 永不释放文字
  *   (lv_label.c:774 `if(!label->static_txt) lv_free(label->text);`) → 归我们。 */
@@ -275,32 +295,26 @@ static void chat_label_deleted_cb(lv_event_t *e)
         lv_obj_set_user_data(label, NULL);
     }
 }
+#endif
 
-/* 把文字设进标签 —— 副本放 PSRAM。
+/* 把文字设进标签。
  *
- * ★ 为什么不用 lv_label_set_text:
- *     LVGL 配的是 CLIB malloc (CONFIG_LV_USE_CLIB_MALLOC=y) = 标准 malloc,
- *     而 sdkconfig 里 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384 →
- *     **小于 16KB 的分配全部落在内部 SRAM**。一条消息最大 2KB (BUS_TEXT_LEN),
- *     10 条就是 20KB 内部 SRAM —— 而内部 SRAM 要留给队列 / I2S DMA / LVGL 自己。
- *     所以这里显式 heap_caps_malloc(MALLOC_CAP_SPIRAM)。
+ * 路径 A (=0, 当前): lv_label_set_text —— LVGL 自己拷贝到它的堆 (内部 SRAM)。
+ *   和 SquareLine 导出的写法完全一致, 已验证可用。
  *
- * ★ 为什么用 set_text_static 而不是让它自己拷贝:
- *     static 模式让 LVGL 只存指针、不拷贝也不释放 → 内存完全归我们控制,
- *     删除时由 chat_label_deleted_cb 释放。代价是必须自己管生命周期。
- *     ⚠️ 绝对不要对这些标签再调 lv_label_set_text(非 static) ——
- *        LVGL 会拿 lv_free 去 free 我们的指针 (CLIB 下侥幸能过, 但语义已错)。 */
+ * 路径 B (=1): 自己 heap_caps_malloc(MALLOC_CAP_SPIRAM) + set_text_static。
+ *   ⚠️ 当前不可用 (文字不画), 原因未定位 —— 见上面 CHAT_TEXT_IN_PSRAM 的说明。 */
 static void chat_label_set(lv_obj_t *label, const char *text)
 {
     if (label == NULL || text == NULL) {
         return;
     }
 
+#if CHAT_TEXT_IN_PSRAM
     size_t n   = strlen(text) + 1;
     char  *buf = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
     if (buf == NULL) {
-        /* PSRAM 没有就退回内部堆 —— 总比不显示好 (但会记一条告警) */
-        buf = (char *)heap_caps_malloc(n, MALLOC_CAP_DEFAULT);
+        buf = (char *)heap_caps_malloc(n, MALLOC_CAP_DEFAULT);   /* 退回内部堆 */
         if (buf == NULL) {
             ESP_LOGE(TAG, "气泡文字分配失败 (%u 字节)", (unsigned)n);
             return;
@@ -310,11 +324,23 @@ static void chat_label_set(lv_obj_t *label, const char *text)
     memcpy(buf, text, n);
 
     char *old = (char *)lv_obj_get_user_data(label);
-    lv_label_set_text_static(label, buf);   /* ★ static: LVGL 不拷贝、不释放 */
-    lv_obj_set_user_data(label, buf);       /*   所有权交给我们, 记在标签上 */
+    lv_label_set_text_static(label, buf);   /* LVGL 只存指针, 不拷贝也不释放 */
+    lv_obj_set_user_data(label, buf);       /* 所有权交给我们, 记在标签上 */
     if (old != NULL) {
         heap_caps_free(old);                /* 流式刷新时会走到这里 */
     }
+
+    /* ⚠️ 诊断用 (只在 PSRAM 路径下打): 确认标签里到底存了什么。
+     *    如果这里打印的字符串是对的、但屏幕还是不画 → 问题在绘制阶段;
+     *    如果打印的字符串本身就不对 → 问题在 set_text_static / 指针。 */
+    {
+        const char *got = lv_label_get_text(label);
+        ESP_LOGI(TAG, "[PSRAM路径] 存入 %u 字节 @%p, 标签读回=\"%s\"",
+                 (unsigned)n, (void *)buf, got ? got : "(null)");
+    }
+#else
+    lv_label_set_text(label, text);         /* ★ LVGL 自己拷贝 (内部堆) */
+#endif
 }
 
 /* 新建一个"我的消息"气泡 (绿底、靠右)。返回文字标签指针。 */
@@ -342,7 +368,10 @@ static lv_obj_t *chat_add_me_bubble(const char *text)
     lv_obj_set_style_pad_right(panel, 8, 0);
     lv_obj_set_style_pad_top(panel, 6, 0);
     lv_obj_set_style_pad_bottom(panel, 6, 0);
-    lv_obj_set_style_radius(panel, 8, 0);
+    /* ★ 这里【故意不设 radius】—— 和 SquareLine 导出的 ui_mepanel 保持一致:
+     *   样例也没设, 所以走主题默认 (lv_theme_default.c:27 的 RADIUS_DEFAULT,
+     *   随 DPI 缩放)。要是自己写死一个数, 就和 SquareLine 里看到的不一样了。
+     *   想要圆角的话在 SquareLine 里给 ui_mepanel 加上 radius, 我再照抄过来。 */
 
     /* ---- 3. 文字 (默认已是 LV_LABEL_LONG_WRAP, 见 lv_label.c:748) ---- */
     lv_obj_t *label = lv_label_create(panel);
@@ -350,7 +379,9 @@ static lv_obj_t *chat_add_me_bubble(const char *text)
     lv_obj_set_style_max_width(label, 280, 0);
     lv_obj_set_style_text_font(label, &ui_font_ch14, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(0x000000), 0);
+#if CHAT_TEXT_IN_PSRAM
     lv_obj_add_event_cb(label, chat_label_deleted_cb, LV_EVENT_DELETE, NULL);
+#endif
     chat_label_set(label, text);
 
     return label;
@@ -380,10 +411,75 @@ static lv_obj_t *chat_push_me(const char *text)
     return label;
 }
 
+/* ================================================================
+ * 每次上屏前同步一次屏幕状态。返回 false = 现在不能上屏。
+ *
+ * ★★ 为什么需要这个:
+ *   SquareLine 的聊天屏是【按需创建 + 离开即销毁】的
+ *   (ui_chat.c:40 `lv_obj_add_event_cb(..., LV_EVENT_SCREEN_UNLOADED, ...ui_chat_screen_destroy)`)。
+ *   所以 ui_contextpanel 会换新对象, 而我们记在 s_bubbles[] / s_live_label 里的
+ *   指针会全部变成悬空指针 —— 下一次 lv_obj_del(s_bubbles[0]) 就是 use-after-free。
+ *
+ * 这里做三件事:
+ *   ① 不在聊天屏 (ui_contextpanel == NULL) → 什么都不做
+ *      ⚠️ 绝不能拿 NULL 去 lv_obj_create —— 那会创建一个【新的屏幕】而不是子对象。
+ *   ② contextpanel 换对象了 → 清空记录 + 清掉 SquareLine 预置的占位气泡
+ *   ③ 兜底: 指针万一失效 (别的路径销毁了屏) → 也清空
+ * ================================================================ */
+static bool chat_view_sync_screen(void)
+{
+    if (ui_contextpanel == NULL) {
+        /* 还没进过聊天屏, 或已经离开了 → 忘掉一切, 绝不能拿去创建对象 */
+        s_bubble_cnt  = 0;
+        s_live_label  = NULL;
+        s_ctx_hooked  = NULL;
+        return false;
+    }
+
+    if (s_ctx_hooked != ui_contextpanel) {
+        /* 屏幕换了 (第一次进, 或者离开过又进来) → 旧指针全部作废 */
+        if (s_ctx_hooked != NULL) {
+            ESP_LOGD(TAG, "聊天屏已重建, 清空气泡记录");
+        }
+        s_ctx_hooked = ui_contextpanel;
+        s_bubble_cnt = 0;
+        s_live_label = NULL;
+
+        /* 删掉 SquareLine 预置的占位气泡 ("你好" / "hello")。
+         * 不然它们会永远挂在 contextpanel 里, 和真实消息混在一起。
+         * ★ lv_obj_is_valid 只做指针比较 (lv_obj.c:450, 遍历对象树比对),
+         *   不解引用入参 → 对悬空指针也安全。
+         * ★ 删完立刻把全局置 NULL, 免得 SquareLine 的 destroy 或别处再引用它。 */
+        if (ui_merollpanel != NULL && lv_obj_is_valid(ui_merollpanel)) {
+            lv_obj_del(ui_merollpanel);
+        }
+        ui_merollpanel = NULL;
+        if (ui_resrollpane != NULL && lv_obj_is_valid(ui_resrollpane)) {
+            lv_obj_del(ui_resrollpane);
+        }
+        ui_resrollpane = NULL;
+    }
+
+    /* ③ 兜底: 记录里的第一个气泡已经不合法 → 整体作废 */
+    if (s_bubble_cnt > 0 && !lv_obj_is_valid(s_bubbles[0])) {
+        ESP_LOGW(TAG, "气泡指针已失效, 清空气泡记录");
+        s_bubble_cnt = 0;
+        s_live_label = NULL;
+    }
+    return true;
+}
+
 /* 收到一条 ASR 文本 → 上屏 (drain_queues 里调用, 跑在 lvgl 任务) */
 static void chat_view_show_asr(const char *text, bool is_final)
 {
     if (text == NULL) {
+        return;
+    }
+    if (!chat_view_sync_screen()) {
+        /* 不在聊天屏: 本轮识别结果只留在控制台。
+         * ⚠️ 已知限制: 现在不会"等你回到聊天屏再补上"。若这变成实际困扰,
+         *    可以在这里把文字存进一个 PSRAM 环形缓冲, 回到聊天屏时重放。 */
+        ESP_LOGW(TAG, "[上屏] 当前不在聊天屏, 丢弃显示: %s", text);
         return;
     }
 
@@ -394,7 +490,10 @@ static void chat_view_show_asr(const char *text, bool is_final)
         } else {
             chat_label_set(s_live_label, text);
             lv_obj_update_layout(ui_contextpanel);
-            lv_obj_scroll_to_view(lv_obj_get_parent(lv_obj_get_parent(s_live_label)), LV_ANIM_ON);
+            /* ★ 流式期用 ANIM_OFF: 每 ~137ms 就来一条, 开动画会一直重启滚动动画,
+             *   看着抖。气泡每轮只长一点, 直接跳反而更稳。
+             *   (定格/新建气泡时用 ANIM_ON, 见 chat_push_me) */
+            lv_obj_scroll_to_view(lv_obj_get_parent(lv_obj_get_parent(s_live_label)), LV_ANIM_OFF);
         }
     } else {
         /* 定格: 确保最终文字显示出来, 然后释放 live 指针 (下一条消息新建气泡) */
@@ -403,7 +502,8 @@ static void chat_view_show_asr(const char *text, bool is_final)
         } else {
             chat_label_set(s_live_label, text);
         }
-        ESP_LOGI(TAG, "[上屏] 定格: %s", text);
+        ESP_LOGI(TAG, "[上屏] 定格: %s  (PSRAM 空闲 %u KB)",
+                 text, (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
         s_live_label = NULL;
     }
 }
@@ -415,6 +515,14 @@ void UiBridge::drain_queues(void)   //< LVGL 侧把两个队列取空 (见 PROTO
      *   绝不能放栈上。本函数只被 ui_timer_cb 调用(单线程上下文), 所以 static 安全。 */
     static stream_msg_t s;
     static resp_msg_t   r;
+
+    /* ★★ 每轮都同步一次屏幕状态 —— 不是只在上屏时。
+     *   原因: 同步里会删掉 SquareLine 预置的占位气泡 ("你好" / "hello")。
+     *   如果只在 chat_view_show_asr 里同步, 那就要【等用户说第一句话】才删 ——
+     *   进聊天屏后到开口之前, 屏幕上一直挂着两个假气泡。
+     *   放到这里 (~137ms 一轮) 就等于"一进聊天屏就清干净"。
+     *   本函数幂等, 重复调用只花一次 lv_obj_is_valid 遍历, 可忽略。 */
+    chat_view_sync_screen();
 
     /* ---- 流式通道: 覆盖队列, "非空"就等于"有变化", 拿到才刷 ----
      * ★★ V2 的核心收益: s.text 永远是【完整文本】, 所以这里【零累积状态】——

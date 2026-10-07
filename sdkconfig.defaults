@@ -44,6 +44,16 @@ CONFIG_LV_FONT_MONTSERRAT_26=y
 CONFIG_LV_FONT_MONTSERRAT_38=y
 # LVGL 日志 (调试, 稳定后可关)
 CONFIG_LV_USE_LOG=y
+# ★★ 修复 chat 屏气泡「框长对了但一个字都不画」:
+#   SquareLine 导出的 ui_font_ch14.c 带 .bitmap_format = 1 (= COMPRESSED),
+#   而 LVGL 的压缩支持默认关闭 → lv_font_fmt_txt.c:207 走 #else 分支直接
+#   `LV_LOG_WARN("Compressed fonts is used but LV_USE_FONT_COMPRESSED is not enabled")`
+#   然后 return NULL —— 一个像素都不画。
+#   而度量表(glyph_dsc)不受 bitmap_format 影响, 所以宽度照常算出 → 框会长、字没有。
+#   (其它 7 个项目字体都是 bitmap_format = 0 明文, 所以只有聊天屏中招。)
+#   ★ 另一个办法: 在 SquareLine 里取消该字体的 "Compress" 再导出 (bitmap_format 变 0),
+#     那样不需要解压器、渲染也更快。两者选一即可, 不要同时做多余的事。
+CONFIG_LV_USE_FONT_COMPRESSED=y
 # ★ 修复 I8 索引图(小图标/logo)不显示: SW 渲染器不能直接画索引图,
 #   开启后在打开时把 I8 整体解码成 ARGB8888 再画 (RGB565A8 不受影响, 仍零拷贝)
 CONFIG_LV_BIN_DECODER_RAM_LOAD=y
