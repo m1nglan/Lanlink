@@ -10,27 +10,25 @@
 static const char *TAG = "rtasr";
 
 /* ================================================================
- * RtAsr: 语音听写(text 服务)业务驱动
- * 依赖共享 WS 连接,通过 set_handler 注册消息处理器,由 WS 按 type 分发:
- *   partial(语音增量) → handle_partial(追加 buffer,流式显示)
- *   revise(语音修正)  → handle_revise(整体替换 buffer,修正错字)
- *   final(语音完成)   → handle_final(覆盖 buffer + 触发完成回调)
+ * [链] websocket_task → WS::handle_data → WS::dispatch_msg
+ *      → 【handle_asr / handle_final】 → store_and_notify
+ *        → [回调] UiBridge::on_asr_result → post_stream → stream_q → 气泡
+ *
+ * 注册 "asr"/"final" 两个 type, 都由 WS 查表分发(不再有"按服务分流")。
+ * V2 协议细节详见 MD/PROTOCOL.md。
  * ================================================================ */
 
-/* 累积识别文字 buffer: partial 追加, revise/final 覆盖, 每轮 start 时清零。
- * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM(文字低频访问,不影响速度) */
+/* 识别文字 buffer —— V2 下它只是"最近一条完整句"的存放处, 不做累积。
+ * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM (文字低频访问, 不影响速度) */
 EXT_RAM_BSS_ATTR static char s_result[1024];
 
 void RtAsr::attach(WS &ws)
 {
     m_ws = &ws;
-    /* 注册 text 服务的处理器:
-     *   partial → set_partial_handler("text"), 由 WS 按当前服务路由
-     *   final/revise → 普通 set_handler, 按 type 精确匹配 */
-    ws.set_partial_handler("text", &RtAsr::handle_partial, this);
+    /* 注册 text 服务的处理器 (V2: 都是普通 set_handler, 按 type 精确匹配) */
+    ws.set_handler("asr",   &RtAsr::handle_asr,   this);
     ws.set_handler("final", &RtAsr::handle_final, this);
-    ws.set_handler("revise", &RtAsr::handle_revise, this);
-    ESP_LOGI(TAG, "RtAsr 已绑定 WS");
+    ESP_LOGI(TAG, "RtAsr 已绑定 WS (V2: asr/final)");
 }
 
 void RtAsr::set_result_callback(rtasr_result_cb_t cb, void *user_ctx)
@@ -53,9 +51,14 @@ esp_err_t RtAsr::switch_service(const char *service, uint32_t timeout_ms)
 esp_err_t RtAsr::start(uint32_t timeout_ms)
 {
     if (m_ws == NULL) {
+        ESP_LOGE(TAG, "start: WS 未绑定");
         return ESP_ERR_INVALID_STATE;
     }
     esp_err_t ret = m_ws->send_text("{\"type\":\"start\"}", timeout_ms);
+    /* ★ 打出来: 网关那边到底收没收到 start。服务名一起打 —— 服务不对时
+     *   网关会把它当未知消息, 那就等于白发。 */
+    ESP_LOGI(TAG, "→ start (service=%s, connected=%d): %s",
+             m_ws->get_service(), (int)m_ws->is_connected(), esp_err_to_name(ret));
     if (ret == ESP_OK) {
         s_result[0] = '\0';  /* 新一轮开始,清空累积文字 */
     }
@@ -73,92 +76,82 @@ esp_err_t RtAsr::send_audio(const uint8_t *data, size_t len, uint32_t timeout_ms
 esp_err_t RtAsr::end(uint32_t timeout_ms)
 {
     if (m_ws == NULL) {
+        ESP_LOGE(TAG, "end: WS 未绑定");
         return ESP_ERR_INVALID_STATE;
     }
-    return m_ws->send_text("{\"type\":\"end\"}", timeout_ms);
+    esp_err_t ret = m_ws->send_text("{\"type\":\"end\"}", timeout_ms);
+    /* ★★ 必须打: 网关靠这条 end 才会下发 final 并结束本轮 ASR。
+     *    以前这里返回值直接丢掉 —— 一旦发送失败(比如此刻 !m_connected,
+     *    send_text 会静默返回 ESP_ERR_INVALID_STATE), end 根本没出去,
+     *    网关那边只能干等到超时才断开, 而板子上什么提示都没有。
+     *    ⚠️ 服务名一起打: 若此刻停在 llm 服务(ASR 结束后切过去问 LLM 了),
+     *       这条 end 会被网关当未知消息丢掉 —— 下一轮录音开头会切回 text,
+     *       但如果没切成功, end 就白发。 */
+    ESP_LOGI(TAG, "→ end (service=%s, connected=%d): %s",
+             m_ws->get_service(), (int)m_ws->is_connected(), esp_err_to_name(ret));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "end 发送失败! 网关将收不到本轮结束, 只能等超时断开");
+    }
+    return ret;
 }
 
-/* 语音增量: 服务器每条 partial 只含新增字,追加到累积 buffer 并流式显示 */
-void RtAsr::handle_partial(const char *payload, int len, void *ctx)
+/* asr / final 两个回调共用的前半段: 解析 JSON + 取 "text" 字段。
+ * 成功返回 true 并把 root 交回调用方 delete; *text 指向 root 内部内存
+ * → 调用方**必须先用 text、再 delete root**。 */
+static bool extract_text(const char *payload, const char **text, cJSON **root_out)
 {
-    RtAsr *self = static_cast<RtAsr *>(ctx);
-    if (self == nullptr) {
-        return;
-    }
-
     cJSON *root = cJSON_Parse(payload);
     if (root == NULL) {
-        return;
+        return false;
     }
     const cJSON *text_item = cJSON_GetObjectItem(root, "text");
-    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        self->accumulate(text_item->valuestring, false);   /* is_final=false → 追加 */
+    if (text_item == NULL || !cJSON_IsString(text_item) || text_item->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return false;
     }
-    cJSON_Delete(root);
+    *text     = text_item->valuestring;
+    *root_out = root;
+    return true;
 }
 
-/* 语音修正: 服务器发完整当前文本,整体替换 buffer(修正错字),不回 IDLE/不触发完成 */
-void RtAsr::handle_revise(const char *payload, int len, void *ctx)
+/* 流式识别 ({"type":"asr"}): 网关发的是【完整当前句】, 整体替换后通知 UI */
+void RtAsr::handle_asr(const char *payload, int len, void *ctx)
 {
     (void)len;
     RtAsr *self = static_cast<RtAsr *>(ctx);
-    if (self == nullptr) {
-        return;
+    const char *text = NULL;
+    cJSON *root = NULL;
+    if (self != nullptr && extract_text(payload, &text, &root)) {
+        self->store_and_notify(text, false);   /* false = 还没说完 */
+        cJSON_Delete(root);
     }
-
-    cJSON *root = cJSON_Parse(payload);
-    if (root == NULL) {
-        return;
-    }
-    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
-    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        self->revise(text_item->valuestring);   /* 修正: 替换 buffer,不触发完成 */
-    }
-    cJSON_Delete(root);
 }
 
-/* 语音完成: 服务器发最终完整文本,覆盖 buffer 并触发完成回调(回 IDLE + LLM 转发) */
+/* 语音完成 ({"type":"final"}): 网关发【完整最终句】, 整体替换后通知 UI + 标记完成 */
 void RtAsr::handle_final(const char *payload, int len, void *ctx)
 {
+    (void)len;
     RtAsr *self = static_cast<RtAsr *>(ctx);
-    if (self == nullptr) {
-        return;
+    const char *text = NULL;
+    cJSON *root = NULL;
+    if (self != nullptr && extract_text(payload, &text, &root)) {
+        self->store_and_notify(text, true);    /* true = 本轮完成 */
+        cJSON_Delete(root);
     }
-
-    cJSON *root = cJSON_Parse(payload);
-    if (root == NULL) {
-        return;
-    }
-    const cJSON *text_item = cJSON_GetObjectItem(root, "text");
-    if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        self->accumulate(text_item->valuestring, true);   /* is_final=true → 覆盖 */
-    }
-    cJSON_Delete(root);
 }
 
-/* 语音修正核心: 整体替换 buffer,换行重打整条(标记[修正]),不触发完成回调 */
-void RtAsr::revise(const char *text)
+/* 核心: 整体替换 buffer + 触发回调。 [链同]
+ *
+ * ★★ V2: 这里【没有累积】—— 网关每次给的都是完整句, 直接 strlcpy 覆盖。
+ * ★★ 本函数在 WS 回调里跑, 而回调由 websocket_task **持着 client->lock** 调用
+ *   → 绝对不能有耗时/阻塞操作。原版有 printf+fflush: 会拖住 send_audio, 并把
+ *   UART 中断打爆(Interrupt WDT panic)。详见 MD/HANDOFF.md §6-I */
+void RtAsr::store_and_notify(const char *text, bool is_final)
 {
-    strlcpy(s_result, text, sizeof(s_result));
-    printf("\n[修正] %s", s_result);   /* 换行 + [修正] 前缀,直观看到修正处 */
-    fflush(stdout);
-}
-
-/* 累积核心: 增量追加(partial)或完整覆盖(final),并打印显示
- * is_final=false: strlcat 追加, 打印新增字(流式)
- * is_final=true:  strlcpy 覆盖, 打印完整结果(换行定格), 并触发 m_cb 完成回调 */
-void RtAsr::accumulate(const char *text, bool is_final)
-{
-    if (is_final) {
-        strlcpy(s_result, text, sizeof(s_result));
-        printf("\n[识别] %s\n", s_result);   /* 完整结果: 换行定格 */
-    } else {
-        strlcat(s_result, text, sizeof(s_result));
-        printf("%s", text);   /* 流式: 只打印新增字符,不换行,字从行尾冒出来 */
-    }
-    fflush(stdout);
+    strlcpy(s_result, text, sizeof(s_result));   /* ★ 整体替换, 不追加 */
+    ESP_LOGD(TAG, "[%s] %s", is_final ? "final" : "asr", s_result);
 
     if (m_cb != NULL) {
-        m_cb(s_result, is_final, m_cb_ctx);   /* final 时触发完成回调(回 IDLE + LLM 转发) */
+        m_cb(s_result, is_final, m_cb_ctx);   /* 交给调度层(UiBridge → 投 stream_q) */
     }
 }

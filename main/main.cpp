@@ -2,173 +2,119 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_timer.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/stream_buffer.h"
 
-#include "drivers/wifi.hpp"
-#include "drivers/button.hpp"
-#include "drivers/i2s_mic.hpp"
-#include "drivers/ws.hpp"
-#include "drivers/rtasr.hpp"
-#include "drivers/llm.hpp"
-#include "drivers/app_fsm.hpp"
-#include "drivers/encoder.hpp"
-#include "display/lvgl_port.hpp"
+#include "business/ui_bridge.hpp"
+#include "business/voice.hpp"
+#include "business/ws_keeper.hpp"
 #include "display/lcd_display.hpp"
+#include "display/lvgl_port.hpp"
+#include "drivers/button_edge.hpp"
+#include "drivers/encoder.hpp"
+#include "drivers/wifi.hpp"
 #include "ui.h"
 
 static const char *TAG = "Main";
 
 /* ================================================================
- * 总体架构(双核三任务):
- *   CPU0: ws_task      WiFi + 长连接 + 语音收发 + LLM 转发(调用 AppFsm::tick)
- *   CPU1: button_task  按键检测(IO10 长按录音 / IO8 切换服务)
- *   CPU1: i2s_task     I2S 采集 PCM → 写 StreamBuffer
+ * app_main: 屏幕 → 输入 → WiFi → 业务总线 → 业务任务
  *
- * 业务状态机(录音/LLM/服务选择)全部封装在 AppFsm 驱动里,
- * 本文件只负责: 任务创建 + 回调接线 + 音频缓冲。
+ * [链] app_main → lvgl_port_init ─┬─ lcd_panel_init → ST7789 + 背光先关
+ *                                 └─ lv_init + display + flush_cb + tick + lvgl 任务
+ *      → ui_init → 背光开 → encoder_init → indev 注册 → 按键中断 ×2
+ *      → WiFi::init (阻塞) → UiBridge::init (建队列) → start_ui_timer
+ *      → ws_keeper_start → voice_task_start
+ *
+ * 自建任务 3 个 (+ 组件自带的 websocket_task): 2026 版已去轮询化
+ *   lvgl       CPU1 prio2 6K   lv_timer_handler + 编码器 indev + 消费队列上屏
+ *   ws_keeper  CPU0 prio5 8K   WS 连接生命周期: 建连/重连/保活
+ *   voice      CPU0 prio6 6K   命令驱动语音会话 (真采音)
+ *   websocket  CPU0 prio5 4K   组件自带 (ws.cpp::init 里钉核) —— 回调在此上下文跑
+ *
+ * 无任务的输入: 按键 = GPIO中断 + esp_timer 消抖 → 投 voice_q;
+ *               编码器 = GPIO中断 + 累加器 → LVGL indev 在 lv_timer_handler 里消费
+ * 数据流: 按键 → voice_q → voice_task → ASR;  服务器 → resp_q/stream_q → lvgl 上屏
  * ================================================================ */
 
 /* 按键引脚 */
-#define BTN_PIN     GPIO_NUM_10   /* IO10: 录音键(按下为低,内部上拉) */
-#define BTN_SVC_PIN GPIO_NUM_8    /* IO8:  服务切换键(按下为低,内部上拉) */
-#define BTN_HOLD_MS (500)         /* 录音键长按确认时长(防误触) */
+#define BTN_REC_PIN   GPIO_NUM_2   /* IO2: 录音键(按下为低,内部上拉) */
+#define BTN_SVC_PIN   GPIO_NUM_42    /* IO42:  服务切换键(按下为低,内部上拉) */
 
-/* 全局: AppFsm 单例 + 音频缓冲 */
-static AppFsm s_fsm;
-static StreamBufferHandle_t s_audio_buf;
+/* ★ 必须静态: WiFi::init() 会把 this 交给 esp_event 永久持有
+ *   (esp_event_handler_register(..., this))。若放在 app_main 栈上,
+ *   app_main 退出后 WiFi 事件回调就会踩到已释放的栈 → use-after-free。 */
+static WiFi s_wifi;
 
-/* 按键任务(核1): 检测按键, 驱动 AppFsm 录音状态机 + IO8 服务切换 */
-static void button_task(void *arg)
+/* 按键边沿回调 —— 跑在 esp_timer 任务上下文。
+ * 这里做的全部是"非阻塞投队列", 所以可以安全调用 (8 字节消息, timeout=0)。 */
+static void on_button_edge(void *ctx, gpio_num_t pin, bool pressed)
 {
-    (void)arg;
-    Button btn(BTN_PIN);
-    Button btn_svc(BTN_SVC_PIN);
-    ESP_ERROR_CHECK(btn.init());
-    ESP_ERROR_CHECK(btn_svc.init());
+    (void)ctx;
 
-    while (1) {
-        /* ===== 诊断: 裸读 IO8 电平,监视变化(定位是硬件电平还是边沿逻辑问题) ===== */
-        {
-            static int s_last_svc_lvl = -1;
-            int svc_lvl = gpio_get_level(BTN_SVC_PIN);
-            if (svc_lvl != s_last_svc_lvl) {
-                ESP_LOGI(TAG, "[诊断] IO8 裸电平: %d -> %d (active_level=%d)",
-                         s_last_svc_lvl, svc_lvl, BTN_ACTIVE_LEVEL);
-                s_last_svc_lvl = svc_lvl;
-            }
+    if (pin == BTN_REC_PIN) {
+        if (pressed) {
+            ESP_LOGI(TAG, "[按键] 录音键 按下 → voice_start");
+            UiBridge::get().voice_start();
+        } else {
+            ESP_LOGI(TAG, "[按键] 录音键 松开 → voice_stop");
+            UiBridge::get().voice_stop();
         }
-
-        /* IO8 服务切换: 按下沿触发一次(长按不重复) */
-        if (btn_svc.is_pressed_edge()) {
-            ESP_LOGI(TAG, "IO8 按下边沿触发 → 置切换挂起");
-            s_fsm.set_svc_switch_pending();
-        }
-
-        /* IO10 录音: 长按 0.5s 确认开始, 松开结束 */
-        bool pressed = btn.is_pressed();
-        if (pressed && s_fsm.get_state() == ASR_STATE_IDLE && !s_fsm.is_llm_busy()) {
-            uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            bool confirmed = false;
-            while (btn.is_pressed()) {
-                if ((uint32_t)(esp_timer_get_time() / 1000) - start_ms >= BTN_HOLD_MS) {
-                    confirmed = true;
-                    break;
-                }
-            }
-            if (confirmed) {
-                s_fsm.begin_recording();
-                ESP_LOGI(TAG, "开始录音");
-            }
-        } else if (!pressed && s_fsm.get_state() == ASR_STATE_RECORDING) {
-            s_fsm.end_recording();
-            ESP_LOGI(TAG, "\n停止录音,等待结果");
-        }
+    } else if (pin == BTN_SVC_PIN) {
+        /* 服务键: 本阶段只打日志、不投任何队列 (服务切换业务未定)
+         * ★ 日志里用 %d 打印真实 GPIO 号 (从 BTN_SVC_PIN 取), 别写死 "IO8" ——
+         *   引脚改过一次 (IO8 → GPIO42), 写死的数字会跟着过时, 排查时误导人。 */
+        ESP_LOGI(TAG, "[按键] 服务键(IO%d) %s (未接业务)",
+                 (int)BTN_SVC_PIN, pressed ? "按下" : "松开");
     }
-}
-
-/* i2s 任务(核1): 读状态机, 录音时采集写 Stream Buffer */
-static void i2s_task(void *arg)
-{
-    (void)arg;
-    I2sMic mic;
-    ESP_ERROR_CHECK(mic.init());
-    ESP_ERROR_CHECK(mic.start());
-
-    while (1) {
-        static int16_t pcm[I2S_MIC_FRAME_BYTES / 2];  /* static,不在栈上(防栈溢出) */
-        if (mic.read_frame(pcm, sizeof(pcm), 100) == ESP_OK) {
-            if (s_fsm.is_recording()) {
-                xStreamBufferSend(s_audio_buf, pcm, sizeof(pcm), 0);
-            }
-            /* 非录音时丢弃,保持 DMA 缓冲不溢出 */
-        }
-    }
-}
-
-/* ws 任务(核0): WiFi + 长连接 + 语音收发 + LLM 转发(状态机在 AppFsm 驱动) */
-static void ws_task(void *arg)
-{
-    (void)arg;
-    WS &ws = WS::get();
-    RtAsr asr;
-    Llm llm;
-
-    /* 回调接线 + 绑定缓冲 */
-    s_fsm.attach(ws, asr, llm);
-    s_fsm.set_audio_buf(s_audio_buf);
-
-    while (1) {
-        s_fsm.tick();   /* 每轮推进 AppFsm 状态机 */
-    }
-}
-
-/* 编码器 → LVGL 键: 左转 LV_KEY_LEFT, 右转 LV_KEY_RIGHT (屏幕导航用)。
- * 若实际旋转方向反了, 交换 encoder.hpp 里的 ENC_PIN_A/ENC_PIN_B。 */
-static void encoder_lvgl_cb(encoder_dir_t dir)
-{
-    lvgl_port_send_encoder_dir((int)dir);
 }
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "=========Main=========");
+    ESP_LOGI(TAG, "========= Lanlink: 事件驱动调度层 (阶段 0-3 已完成) =========");
     ESP_LOGI(TAG, "空闲堆: %u 字节", (unsigned)esp_get_free_heap_size());
 
-    /* 屏幕: LCD + LVGL 9.5 + SquareLine UI (默认加载 home 屏) */
+    /* ---- 1. 屏幕: LCD + LVGL 9.5 + SquareLine UI ---- */
     ESP_ERROR_CHECK(lvgl_port_init());
     lvgl_port_lock();
     ui_init();
     lvgl_port_unlock();
     lcd_panel_backlight_on();   /* UI 就绪后再点亮背光 */
 
-    /* 旋转编码器 → LVGL 键 (方向变化在编码器任务里经回调发成 KEY_LEFT/RIGHT) */
+    /* ---- 2. 输入: 编码器 indev + 物理按键(中断消抖) ---- */
     ESP_ERROR_CHECK(encoder_init());
-    encoder_set_callback(encoder_lvgl_cb);
+    lvgl_port_lock();                                    /* ★ indev 注册须持锁 */
+    ESP_ERROR_CHECK(lvgl_port_register_encoder_indev());
+    lvgl_port_unlock();
+    ESP_ERROR_CHECK(button_edge_init(BTN_REC_PIN, 0, on_button_edge, NULL));
+    ESP_ERROR_CHECK(button_edge_init(BTN_SVC_PIN, 0, on_button_edge, NULL));
 
-    /* 开机连接 WiFi(阻塞),之后断联重连由 wifi 驱动事件回调处理 */
-    WiFi wifi;
-    ESP_ERROR_CHECK(wifi.init());
-    ESP_LOGI(TAG, "WiFi 连接成功");
-
-    /* 音频流缓冲(约 6 帧,1280 字节/帧),i2s_task 写入,ws_task 读出。
-     * A/B 测试: 从 PSRAM 改回内部 SRAM,验证语音错字是否与 PSRAM 相关。 */
-    s_audio_buf = xStreamBufferCreate(8192, 1);
-    if (s_audio_buf == NULL) {
-        ESP_LOGE(TAG, "音频 StreamBuffer 创建失败");
-        return;
+    /* ---- 3. WiFi (阻塞直到连上或重试耗尽)
+     *  ★ 不 ESP_ERROR_CHECK: 没 WiFi 也要能开机(屏幕/按键/编码器照常工作),
+     *    WS 连接交给 ws_keeper 持续重试。 */
+    esp_err_t wifi_ret = s_wifi.init();
+    if (wifi_ret != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi 未连上 (%s) —— 不中断启动, ws_keeper 会持续重试",
+                 esp_err_to_name(wifi_ret));
     }
 
-    /* 创建三个任务并固定核:
-     *   ws_task     → 核0(网络收发)
-     *   button_task → 核1(按键+状态机)
-     *   i2s_task    → 核1(麦克风采集) */
-    xTaskCreatePinnedToCore(ws_task, "ws", 8192, NULL, 5, NULL, 0);
-    xTaskCreatePinnedToCore(button_task, "button", 4096, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(i2s_task, "i2s", 4096, NULL, 5, NULL, 1);
+    /* ---- 4. 业务总线: 建三队列 + asr 绑 WS + 注册结果回调 (不建连) ---- */
+    ESP_ERROR_CHECK(UiBridge::get().init());
 
-    /* app_main 收尾: 任务创建后自身无用,删除释放栈 */
+    /* ---- 5. UI 消费 timer (★ 须持 LVGL 锁; 内部是 lv_timer_create) ---- */
+    lvgl_port_lock();
+    ESP_ERROR_CHECK(UiBridge::get().start_ui_timer());
+    lvgl_port_unlock();
+
+    /* ---- 6. 业务任务 (CPU0; websocket_task 也在 CPU0, 三者共用 client->lock) ---- */
+    ESP_ERROR_CHECK(ws_keeper_start());
+    ESP_ERROR_CHECK(voice_task_start());
+
+    ESP_LOGI(TAG, "初始化完成: 转编码器切屏 | 按 IO%d 走一轮语音会话 | 按 IO%d 见钩子日志",
+             (int)BTN_REC_PIN, (int)BTN_SVC_PIN);
+    ESP_LOGI(TAG, "空闲堆(初始化后): %u 字节", (unsigned)esp_get_free_heap_size());
+
+    /* app_main 自身已无用, 删除释放栈 */
     vTaskDelete(NULL);
 }

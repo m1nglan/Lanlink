@@ -9,6 +9,10 @@
 
 static const char *TAG = "lcd";
 
+/* [链] app_main → lvgl_port_init → 【lcd_panel_init】 → SPI2总线 + panel IO + ST7789 + 背光先关
+ *      (背光由 lcd_panel_backlight_on 在 ui_init 之后点亮)
+ * 做什么: 纯硬件 bring-up, 建完把 panel/io 句柄交出去给 LVGL flush 用。
+ * ★ 引脚/方向/偏移/反色全是 hpp 里的宏, 这里不做任何硬编码。 */
 esp_err_t lcd_panel_init(esp_lcd_panel_handle_t *panel_out, esp_lcd_panel_io_handle_t *io_out)
 {
     if (panel_out == NULL || io_out == NULL) {
@@ -24,7 +28,7 @@ esp_err_t lcd_panel_init(esp_lcd_panel_handle_t *panel_out, esp_lcd_panel_io_han
     buscfg.miso_io_num = -1;
     buscfg.quadwp_io_num = -1;
     buscfg.quadhd_io_num = -1;
-    buscfg.max_transfer_sz = LCD_H_RES * 80 * sizeof(uint16_t);
+    buscfg.max_transfer_sz = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);   /* ≥ 整屏缓冲 (FULL 模式单次传输全屏) */
     esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize: %s", esp_err_to_name(ret));

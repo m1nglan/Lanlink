@@ -9,12 +9,9 @@
 /* ============================================================================
  * INMP441 I2S 麦克风高层驱动（面向讯飞实时语音转写 S2T 流式上传）
  *
- * 音频输出格式严格遵循「讯飞实时语音转写(标准版)」接口要求：
- *   - 采样率 16kHz
- *   - 位深 16bit（s16le）
- *   - 单声道
- *   - PCM 裸流
- *   - 建议每 40ms 发送 1280 字节
+ * [链] voice_session → 【I2sMic::read_frame】 → RtAsr::send_audio → WS::send_bin → 网关
+ * 音频格式严格遵循讯飞 S2T 要求: 16kHz / 16bit(s16le) / 单声道 / PCM 裸流,
+ * 每 40ms 发 1280 字节。
  * ==========================================================================*/
 
 /* ------------------ 音频格式参数（S2T 层依赖，勿随意修改） ------------------ */
@@ -26,9 +23,9 @@
 
 /* ------------------ 硬件接线参数（按实际连线修改） ------------------ */
 #define I2S_MIC_PORT_NUM            (I2S_NUM_0)  /*!< I2S 控制器编号 */
-#define I2S_MIC_BCLK_PIN            (GPIO_NUM_11) /*!< INMP441 SCK  -> ESP32 BCLK */
-#define I2S_MIC_WS_PIN              (GPIO_NUM_12) /*!< INMP441 WS   -> ESP32 WS(LRCK) */
-#define I2S_MIC_DIN_PIN             (GPIO_NUM_13) /*!< INMP441 SD   -> ESP32 DIN */
+#define I2S_MIC_BCLK_PIN            (GPIO_NUM_21) /*!< INMP441 SCK  -> ESP32 BCLK */
+#define I2S_MIC_WS_PIN              (GPIO_NUM_47) /*!< INMP441 WS   -> ESP32 WS(LRCK) */
+#define I2S_MIC_DIN_PIN             (GPIO_NUM_1) /*!< INMP441 SD   -> ESP32 DIN */
 #define I2S_MIC_DMA_BUF_COUNT       (8)          /*!< DMA 描述符数量 */
 #define I2S_MIC_DMA_FRAME_NUM       (256)        /*!< 每个 DMA buffer 的帧数(32bit 槽) */
 
@@ -60,6 +57,5 @@ public:
 private:
     i2s_chan_handle_t m_rx = nullptr;
     bool m_running = false;
-    /* 底层 32bit 槽位数据缓冲改为 static(不在对象/栈上),避免 main 任务栈溢出 */
 };
 

@@ -39,6 +39,7 @@ extern lv_anim_t * loading_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * longingext_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * wind_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay);
+extern lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay);
 
 // EVENTS
 
@@ -84,13 +85,13 @@ LV_IMG_DECLARE(ui_img_wind_6_png);    // assets/wind_6.png
 
 // FONTS
 LV_FONT_DECLARE(ui_font_balance22);
+LV_FONT_DECLARE(ui_font_ch14);
 LV_FONT_DECLARE(ui_font_date22);
 LV_FONT_DECLARE(ui_font_icon18);
 LV_FONT_DECLARE(ui_font_time40);
 LV_FONT_DECLARE(ui_font_time64);
 LV_FONT_DECLARE(ui_font_updown10);
 LV_FONT_DECLARE(ui_font_weather18);
-LV_FONT_DECLARE(ui_font_ch14);
 
 // UI INIT
 void ui_init(void);

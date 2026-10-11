@@ -9,26 +9,32 @@
 static const char *TAG = "llm";
 
 /* ================================================================
- * Llm: 大模型对话(llm/openclaw 服务)业务驱动
- * 依赖共享 WS 连接,通过 set_handler 注册消息处理器,由 WS 按 type 分发:
- *   partial(对话流式增量) → handle_partial(追加 buffer,逐字流式显示)
- *   reply(完整回复)       → handle_reply(覆盖 buffer,换行定格,置完成标志)
- * 注: partial 与语音识别的 partial 同名,由 WS 按当前服务路由(RtAsr↔Llm)。
+ * [链] websocket_task → WS::dispatch_msg → 【handle_partial / handle_reply】
+ *      → [回调] m_stream_cb → UiBridge → post_stream → stream_q → 气泡
+ *
+ * ★★ 累积【在这里闸口做完】: 每条 partial 同步并进 s_stream, 交出去的是完整回复。
+ *    放到 UI 侧会丢字 —— stream_q 深度 1 覆盖式, 详见 llm.hpp / MD/HANDOFF.md §6-F。
+ * V2 协议详见 MD/PROTOCOL.md。
  * ================================================================ */
 
 /* 对话流式累积 buffer: partial(流式字)追加, reply(完整)覆盖。
  * EXT_RAM_BSS_ATTR: 放 PSRAM 省内部 SRAM(文字低频访问,不影响速度) */
-EXT_RAM_BSS_ATTR static char s_stream[1024];
+EXT_RAM_BSS_ATTR static char s_stream[2048];
 
 void Llm::attach(WS &ws)
 {
     m_ws = &ws;
-    /* 注册对话服务的处理器:
-     *   partial → set_partial_handler("llm"), 由 WS 按当前服务路由
-     *   reply → 普通 set_handler, 按 type 精确匹配 */
-    ws.set_partial_handler("llm", &Llm::handle_partial, this);
-    ws.set_handler("reply", &Llm::handle_reply, this);
-    ESP_LOGI(TAG, "Llm 已绑定 WS");
+    /* V2: partial 只属于 llm/openclaw (text 服务改用 "asr"),
+     * 所以它和 reply 一样走普通 set_handler, 不需要"按服务分流"。 */
+    ws.set_handler("partial", &Llm::handle_partial, this);
+    ws.set_handler("reply",   &Llm::handle_reply,   this);
+    ESP_LOGI(TAG, "Llm 已绑定 WS (V2: partial/reply)");
+}
+
+void Llm::set_stream_callback(llm_stream_cb_t cb, void *user_ctx)
+{
+    m_stream_cb  = cb;
+    m_stream_ctx = user_ctx;
 }
 
 void Llm::set_reply_callback(llm_reply_cb_t cb, void *user_ctx)
@@ -83,8 +89,9 @@ esp_err_t Llm::clear(uint32_t timeout_ms)
     return m_ws->send_text("{\"type\":\"clear\"}", timeout_ms);
 }
 
-/* 对话流式增量: 服务器每条 partial 只含新增字,追加到累积 buffer 并逐字打印
- * (不换行,字从行尾冒出来 → 流式效果; 任何终端都正常,不依赖 ANSI/换行) */
+/* 对话流式增量 ({"type":"partial"})。 [链同]
+ * ★★ 累积在这里做完 —— 交出去的已经是【完整回复】, 不是这一小段增量。
+ *   (V2 相对 V1 的核心改动, 别退回去。) */
 void Llm::handle_partial(const char *payload, int len, void *ctx)
 {
     (void)len;
@@ -99,14 +106,18 @@ void Llm::handle_partial(const char *payload, int len, void *ctx)
     }
     const cJSON *text_item = cJSON_GetObjectItem(root, "text");
     if (text_item != NULL && cJSON_IsString(text_item) && text_item->valuestring[0] != '\0') {
-        strlcat(s_stream, text_item->valuestring, sizeof(s_stream));   /* 累积 */
-        printf("%s", text_item->valuestring);   /* 只打印新增字,不换行 */
-        fflush(stdout);
+        strlcat(s_stream, text_item->valuestring, sizeof(s_stream));   /* 累积增量 */
+
+        /* ★ 关键: 交出去的已经是【完整回复】, 不是这一小段增量。
+         *   (这条注释就是 V2 相对 V1 的核心改动, 别退回去。) */
+        if (self->m_stream_cb != NULL) {
+            self->m_stream_cb(s_stream, false, self->m_stream_ctx);
+        }
     }
     cJSON_Delete(root);
 }
 
-/* 完整回复: 覆盖流式累积,收到即本轮完成(换行定格),并触发完成回调 */
+/* 完整回复 ({"type":"reply"}): 覆盖流式累积, 收到即本轮完成, 触发完成回调 */
 void Llm::handle_reply(const char *payload, int len, void *ctx)
 {
     (void)len;
@@ -121,11 +132,15 @@ void Llm::handle_reply(const char *payload, int len, void *ctx)
     }
     const cJSON *content_item = cJSON_GetObjectItem(root, "content");
     if (content_item != NULL && cJSON_IsString(content_item) && content_item->valuestring[0] != '\0') {
-        strlcpy(s_stream, content_item->valuestring, sizeof(s_stream));   /* 覆盖流式累积 */
-        printf("\n[OpenClaw] %s\n", s_stream);   /* 完整回复: 换行定格 */
-        fflush(stdout);
+        strlcpy(s_stream, content_item->valuestring, sizeof(s_stream));   /* 覆盖累积 */
+
+        /* 先按"完整文本"投一条 is_final=true —— 这样 UI 只靠 stream_q 就能
+         * 同时拿到文本和"完成"标志, 不必再走 resp_q。 */
+        if (self->m_stream_cb != NULL) {
+            self->m_stream_cb(s_stream, true, self->m_stream_ctx);
+        }
         if (self->m_cb != NULL) {
-            self->m_cb(s_stream, self->m_cb_ctx);   /* 触发 on_llm_reply(置 s_reply_received) */
+            self->m_cb(s_stream, self->m_cb_ctx);   /* 兼容原有的"完成回调" */
         }
     }
     cJSON_Delete(root);

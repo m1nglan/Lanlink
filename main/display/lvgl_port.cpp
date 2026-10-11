@@ -1,5 +1,6 @@
 #include "display/lvgl_port.hpp"
 #include "display/lcd_display.hpp"
+#include "drivers/encoder.hpp"
 
 #include <stdint.h>
 
@@ -7,6 +8,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "driver/spi_master.h"
 
@@ -17,7 +19,32 @@ static const char *TAG = "lvgl";
 /* ------------------ 参数 ------------------ */
 #define LVGL_SPI_HOST       (SPI2_HOST)
 #define LVGL_TICK_PERIOD_MS (2)
-#define LVGL_DRAW_LINES     (40)        /*!< 每个绘图缓冲的行数 (增大→每帧 flush 次数减半, 更顺; 内存 320*40*2*2=51KB) */
+/* 绘图缓冲的两种模式:
+ *
+ *   FULL=1  双整屏 —— 每帧都把【整屏】重画+传出去, 哪怕只有一个字变了。
+ *           实测 lv_timer_handler() 约 137ms(≈7FPS)。
+ *   FULL=0  partial —— **只重画/只传【脏区】**。这是我们要的。
+ *
+ * ★ 40MHz 的 SPI 传整屏 106KB 要 21.7ms, 所以 FULL 模式光是传输就吃掉大半预算;
+ *   partial 只传脏区, 传输量按脏区面积缩小。
+ *
+ * ★★ partial 的 band 高度为什么取【整屏高】而不是小块 (LVGL_PARTIAL_LINES = V_RES):
+ *
+ *   partial 是按 band 逐条 flush 的。band 取小了 (比如 40 行) 会有【果冻】:
+ *     band1 发出后动画已经推进 → band1 是帧 N, band5 可能已是帧 N+2
+ *     → 屏幕上同时存在几个时刻的画面 ✗ (转屏动画时整屏都是脏区, 5 个 band, 最明显)
+ *
+ *   取到整屏高之后:
+ *     · 脏区够大时 → 一次装下 → **一次 flush = 一个快照** → 果冻消失 ✓
+ *     · 脏区小时   → **仍然只渲染那几百像素** (不像 FULL 要整屏重来) → 提速保留 ✓
+ *
+ *   ⚠️ 代价: 缓冲回到 320*170*2 = 106KB x2 = 212KB (PSRAM, 8MB 富余, 不是问题)。
+ *   ⚠️ 若仍见撕裂/果冻, 就把 LVGL_RENDER_FULL 调回 1 退回双整屏。 */
+#define LVGL_RENDER_FULL    (0)
+#define LVGL_BUF_IN_PSRAM   (1)         /*!< 1=绘图缓冲放 PSRAM (SPI2+GDMA 直读, 自动 cache sync);
+                                            0=内部 DMA SRAM。
+                                            ★ 放内部 SRAM 渲染更快 (LVGL 每像素写 PSRAM 比写 SRAM 慢),
+                                              但缓冲有 106KB, 内部 SRAM 装不下 → **别改成 0**。 */
 #define LVGL_TASK_PRIO      (2)
 #define LVGL_TASK_STACK     (6 * 1024)
 #define LVGL_TASK_CORE      (1)         /*!< CPU1 (网络 ws_task 在 CPU0) */
@@ -61,18 +88,27 @@ static void lvgl_port_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "LVGL task started");
-    uint32_t wait_ms = 0;
     while (1) {
         lvgl_port_lock();
-        wait_ms = lv_timer_handler();
+        uint32_t wait_ms = lv_timer_handler();
         lvgl_port_unlock();
-        if (wait_ms < 5) {
-            wait_ms = 5;      /* 避免忙循环空转 */
-        }
+
+        /* 先按 ms 夹紧上界: wait_ms 可能是 LV_NO_TIMER_READY(0xFFFFFFFF),
+         * 直接进 pdMS_TO_TICKS 会溢出。 */
         if (wait_ms > 500) {
             wait_ms = 500;    /* 避免长时间不调度 */
         }
-        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+
+        /* ★★ 必须保证换算后【至少 1 个 tick】, 不能只按 ms 夹紧:
+         *   HZ=100 时 pdMS_TO_TICKS(1..9)==0, 而 vTaskDelay(0) **不让出 CPU**
+         *   → 渲染(实测~137ms) > LVGL 周期(33ms) 时 lv_timer_handler 总返回极小值
+         *   → 本任务占满 CPU1 → IDLE1 永不调度 → 5s 后 Task WDT。
+         *   详见 MD/HANDOFF.md §6 (IDF/FreeRTOS 表) */
+        TickType_t ticks = pdMS_TO_TICKS(wait_ms);
+        if (ticks < 1) {
+            ticks = 1;
+        }
+        vTaskDelay(ticks);
     }
 }
 
@@ -99,15 +135,30 @@ esp_err_t lvgl_port_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /* 4. 绘图缓冲: 内部 DMA 内存, 双缓冲 partial render */
-    size_t buf_sz = LCD_H_RES * LVGL_DRAW_LINES * sizeof(lv_color16_t);
-    void *buf1 = spi_bus_dma_memory_alloc(LVGL_SPI_HOST, buf_sz, 0);
-    void *buf2 = spi_bus_dma_memory_alloc(LVGL_SPI_HOST, buf_sz, 0);
+    /* 4. 绘图缓冲: FULL=双整屏 320*170*2 ≈106KB x2; PSRAM=1 时放 PSRAM
+     *    (SPI2 + GDMA 直读, 驱动自动 cache sync/对齐)
+     *    ★ partial 的 band 高度取【整屏高】—— 理由见文件上方 LVGL_RENDER_FULL 那段注释
+     *      (取小了会在转屏动画时出现"果冻": band 之间动画已推进, 屏幕上拼了不同帧)。 */
+#if LVGL_RENDER_FULL
+    size_t buf_sz = LCD_H_RES * LCD_V_RES * sizeof(lv_color16_t);
+    lv_display_render_mode_t render_mode = LV_DISPLAY_RENDER_MODE_FULL;
+#else
+    #define LVGL_PARTIAL_LINES (LCD_V_RES)   /*!< = 170, 一次装下整个脏区 */
+    size_t buf_sz = LCD_H_RES * LVGL_PARTIAL_LINES * sizeof(lv_color16_t);
+    lv_display_render_mode_t render_mode = LV_DISPLAY_RENDER_MODE_PARTIAL;
+#endif
+#if LVGL_BUF_IN_PSRAM
+    uint32_t buf_caps = MALLOC_CAP_SPIRAM;
+#else
+    uint32_t buf_caps = MALLOC_CAP_INTERNAL;
+#endif
+    void *buf1 = spi_bus_dma_memory_alloc(LVGL_SPI_HOST, buf_sz, buf_caps);
+    void *buf2 = spi_bus_dma_memory_alloc(LVGL_SPI_HOST, buf_sz, buf_caps);
     if (buf1 == NULL || buf2 == NULL) {
         ESP_LOGE(TAG, "draw buffer 分配失败 (%u B x2)", (unsigned)buf_sz);
         return ESP_ERR_NO_MEM;
     }
-    lv_display_set_buffers(disp, buf1, buf2, buf_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(disp, buf1, buf2, buf_sz, render_mode);
     lv_display_set_user_data(disp, panel);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
@@ -138,8 +189,15 @@ esp_err_t lvgl_port_init(void)
     xTaskCreatePinnedToCore(lvgl_port_task, "lvgl", LVGL_TASK_STACK, NULL,
                             LVGL_TASK_PRIO, NULL, LVGL_TASK_CORE);
 
-    ESP_LOGI(TAG, "LVGL 9.5 port ready: %dx%d, %d-line draw buf (RGB565)",
-             LCD_H_RES, LCD_V_RES, LVGL_DRAW_LINES);
+#if LVGL_RENDER_FULL
+    ESP_LOGI(TAG, "LVGL 9.5 port ready: %dx%d, FULL 双整屏 ~%uKB x2 (%s), pclk=%dHz",
+             LCD_H_RES, LCD_V_RES, (unsigned)(buf_sz / 1024),
+             (buf_caps & MALLOC_CAP_SPIRAM) ? "PSRAM" : "SRAM", LCD_PIXEL_CLOCK_HZ);
+#else
+    ESP_LOGI(TAG, "LVGL 9.5 port ready: %dx%d, partial %d行 (%s), pclk=%dHz",
+             LCD_H_RES, LCD_V_RES, LVGL_PARTIAL_LINES,
+             (buf_caps & MALLOC_CAP_SPIRAM) ? "PSRAM" : "SRAM", LCD_PIXEL_CLOCK_HZ);
+#endif
     return ESP_OK;
 }
 
@@ -157,28 +215,119 @@ void lvgl_port_unlock(void)
     }
 }
 
-void lvgl_port_send_encoder_dir(int dir)
+/* 确保"当前激活屏幕"是 group 里唯一且被聚焦的对象 (无锁, 须在持锁上下文调用)。
+ * [链] 【本函数】 ← lvgl_encoder_read_cb (每轮) → 组内只留当前屏 + 重申编辑模式
+ *      → 聚焦屏才收得到 LV_EVENT_KEY → SquareLine 切屏回调
+ *
+ * ★★ 必须重申【编辑模式】: lv_group_focus_obj() 内部第一件事就是
+ *    lv_group_set_editing(g, false) (lv_group.c:242) —— 只要它被调用, 编辑模式就没了;
+ *    没了之后旋转退化成 navigate(只 focus_next/prev, 不发 LV_KEY_LEFT/RIGHT)
+ *    → 屏幕完全无反应。旧屏残留还会让"每次都调 focus_obj", 每轮清一次。
+ *    详见 MD/HANDOFF.md §5.1 */
+static void lvgl_focus_active_screen_locked(lv_group_t *g)
 {
-    lvgl_port_lock();
+    if (g == NULL) {
+        return;
+    }
+    lv_obj_t *scr = lv_screen_active();
+    if (scr == NULL) {
+        return;
+    }
 
-    /* 1. 无默认 group 就建一个 (SquareLine 导出不建组, 这里兜底) */
+    /* 组里只留当前屏。稳定态下两个条件都成立 → 整块跳过, 无额外开销/无重绘。 */
+    if (lv_obj_get_group(scr) != g || lv_group_get_focused(g) != scr) {
+        lv_group_remove_all_objs(g);        /* 旧屏全部移出 (否则触发上面坑 2) */
+        lv_group_add_obj(g, scr);
+        if (lv_group_get_focused(g) != scr) {
+            lv_group_focus_obj(scr);
+        }
+    }
+
+    /* 编辑模式: 旋转必须发 LV_KEY_LEFT/RIGHT (SquareLine 监听的是 LV_EVENT_KEY)。
+     * 放在最后 + 幂等 (内部 editing 相同则直接 return) → 自愈上面两个坑。 */
+    if (!lv_group_get_editing(g)) {
+        lv_group_set_editing(g, true);
+    }
+}
+
+/* ============ 编码器 indev (无任务, 由 lv_timer_handler 周期驱动) ============
+ * [链] GPIO中断(A/B双相) → encoder_isr → s_accum
+ *      → 【lvgl_encoder_read_cb】 → data->enc_diff → LVGL → LV_KEY_LEFT/RIGHT
+ *      → 聚焦对象 → 冒泡到屏 → SquareLine 切屏回调
+ * 本回调在 lv_timer_handler 内部被调, 已持 LVGL 锁 → 禁止再加锁。 */
+
+static int s_enc_carry = 0;    /*!< 不足一格的跳变余数 (跨帧累积) */
+
+/*! 编码器输入开关 —— 录音期间禁止转屏 (写它的是 voice_task/CPU0, 读它的是 lvgl 任务/CPU1) */
+static volatile bool s_enc_enabled = true;
+
+void lvgl_port_set_encoder_enabled(bool enabled)
+{
+    s_enc_enabled = enabled;
+    ESP_LOGI(TAG, "编码器输入 %s", enabled ? "已恢复" : "已暂停 (录音中, 禁止转屏)");
+}
+
+static void lvgl_encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+
+    int32_t raw = encoder_consume_raw();      /* ★ 无论开关状态都必须先取走 */
+
+    if (!s_enc_enabled) {
+        /* ★★ 暂停时【故意丢弃】raw 和已有余数: 攒着的话, 恢复那一刻会一次性倾泻
+         *    几十格 → 连跳好几屏。语义是"录音期间转的不算数"。 */
+        s_enc_carry    = 0;
+        data->enc_diff = 0;
+        data->key      = LV_KEY_ENTER;
+        data->state    = LV_INDEV_STATE_RELEASED;
+        /* 聚焦逻辑仍要跑(幂等), 万一期间屏幕因别的原因变了, 焦点要跟上 */
+        lv_group_t *g = lv_group_get_default();
+        if (g != NULL) {
+            lvgl_focus_active_screen_locked(g);
+        }
+        return;
+    }
+
+    s_enc_carry += raw;
+
+    int32_t steps = s_enc_carry / ENC_KEY_STEP;   /* 整格数 (C 语言负数除法向零截断) */
+    s_enc_carry -= steps * ENC_KEY_STEP;          /* 余数留到下轮 */
+
+    data->enc_diff = (int16_t)steps;              /* 正=右, 负=左 */
+    data->key      = LV_KEY_ENTER;                /* 编码器无按键, 占位 */
+    data->state    = LV_INDEV_STATE_RELEASED;     /* 永远松开 (无按下源) */
+
+    /* 每轮确保聚焦当前屏: 切屏后新屏才能收到后续旋转键 */
+    lv_group_t *g = lv_group_get_default();
+    if (g != NULL) {
+        lvgl_focus_active_screen_locked(g);
+    }
+}
+
+esp_err_t lvgl_port_register_encoder_indev(void)
+{
+    /* 1. 默认 group (SquareLine 导出不建组) */
     lv_group_t *g = lv_group_get_default();
     if (g == NULL) {
         g = lv_group_create();
         lv_group_set_default(g);
     }
 
-    /* 2. 让"当前激活屏幕"成为聚焦对象。
-     *    SquareLine 把切屏事件(lv_event_get_key == LV_KEY_LEFT/RIGHT)
-     *    挂在屏幕对象本身上, 只有被聚焦的屏幕才能收到 LV_EVENT_KEY。 */
-    lv_obj_t *scr = lv_screen_active();
-    if (scr != NULL) {
-        if (lv_obj_get_group(scr) != g) {
-            lv_group_add_obj(g, scr);
-        }
-        lv_group_focus_obj(scr);
-        lv_group_send_data(g, (dir < 0) ? LV_KEY_LEFT : LV_KEY_RIGHT);
-    }
+    /* 2. ★ 编辑模式: 旋转必须发 LV_KEY_LEFT/RIGHT 给聚焦对象 (SquareLine 监听的是前者),
+     *    而不是移动焦点(导航模式)。见 lvgl_focus_active_screen_locked() 的坑。 */
+    lv_group_set_editing(g, true);
 
-    lvgl_port_unlock();
+    /* 3. 建 indev 并绑定 */
+    lv_indev_t *indev = lv_indev_create();
+    if (indev == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    lv_indev_set_type(indev, LV_INDEV_TYPE_ENCODER);
+    lv_indev_set_read_cb(indev, lvgl_encoder_read_cb);
+    lv_indev_set_group(indev, g);
+
+    lvgl_focus_active_screen_locked(g);
+
+    ESP_LOGI(TAG, "encoder indev 注册完成 (编辑模式, 发 LV_KEY_LEFT/RIGHT)");
+    return ESP_OK;
 }

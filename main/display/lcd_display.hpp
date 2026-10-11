@@ -8,26 +8,29 @@
 /* ================================================================
  * LCD 驱动: ST7789 320x170 1.9寸条屏 (SPI2_HOST, 纯 IDF esp_lcd)
  *
- * 接线:
- *   SCLK=40  MOSI=39  RST=38  DC=37  CS=36  BL(背光)=35
+ * [链] app_main → lvgl_port_init ─┬─ 【lcd_panel_init】 → SPI总线 + panel IO + ST7789 + 背光先关
+ *                                 └─ lv_init + display + flush_cb + tick + lvgl 任务
+ *      ui_init 完成后 → 【lcd_panel_backlight_on】点亮背光 (避免启动过程白屏/雪花)
  *
- * 使用: lcd_panel_init() 只负责硬件初始化 + 点亮背光;
- *       LVGL 移植层(lvgl_port)拿到 panel/io 句柄做刷屏。
+ * ★★ 接线【以本文件下方 LCD_PIN_* 宏为唯一准绳】, 注释里的数字容易过时。
+ *   旧版曾用 35/36/37 —— 撞 n16r8 的 Octal PSRAM(GPIO33-37), 出过雪花 + 位翻转;
+ *   又用过 21/20/19/47/48/45; 现为下面这组。
+ *   ⚠️ 其中 3/46 是 strapping 脚 (JTAG 源选择 / VDD_SPI), 合法但上电有默认电平。
  * ================================================================ */
 
 /* ------------------ 引脚 ------------------ */
-#define LCD_PIN_SCLK    (GPIO_NUM_21)
-#define LCD_PIN_MOSI    (GPIO_NUM_20)
-#define LCD_PIN_RST     (GPIO_NUM_19)
-#define LCD_PIN_DC      (GPIO_NUM_47)
-#define LCD_PIN_CS      (GPIO_NUM_48)
-#define LCD_PIN_BL      (GPIO_NUM_45)
+#define LCD_PIN_SCLK    (GPIO_NUM_9)
+#define LCD_PIN_MOSI    (GPIO_NUM_46)
+#define LCD_PIN_RST     (GPIO_NUM_3)
+#define LCD_PIN_DC      (GPIO_NUM_8)
+#define LCD_PIN_CS      (GPIO_NUM_18)
+#define LCD_PIN_BL      (GPIO_NUM_17)
 #define LCD_BL_ON_LEVEL (1)                     /*!< 背光点亮电平 */
 
 /* ------------------ 分辨率 / 时钟 ------------------ */
 #define LCD_H_RES        (320)                  /*!< 条屏宽 */
 #define LCD_V_RES        (170)                  /*!< 条屏高 */
-#define LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)   /*!< SPI 像素时钟, 可试 40MHz */
+#define LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)   /*!< SPI 像素时钟 40MHz */
 
 /* ------------------ 条屏 bring-up 调参旋钮 ------------------
  * 320x170 条屏首次上电可能出现偏移/翻转/反色, 按实际现象调这里:
@@ -49,13 +52,6 @@
 #define LCD_RGB_ORDER_RGB   1
 #define LCD_SWAP_BYTES      1
 #define LCD_INVERT_COLOR    1
-
-/* ------------------ 旋转编码器预留引脚 ------------------
- * 后续接屏幕切换导航用 (本阶段只预留, 不初始化)。
- * 避开已占用: IO8/10/11/12/13 (按键+I2S) 和屏的 35~40 */
-#define ENC_A_PIN       (GPIO_NUM_4)
-#define ENC_B_PIN       (GPIO_NUM_5)
-#define ENC_BTN_PIN     (GPIO_NUM_6)
 
 /*!
  * 初始化 SPI 总线 + ST7789 面板, 点亮背光。
