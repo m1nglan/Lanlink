@@ -30,23 +30,15 @@ static const char *TAG = "voice";
  *  ★ 兜底: 网关若比我们早判超时, on_ws_error 会投 VOICE_STOP 同样收尾。 */
 #define VOICE_MAX_RECORD_MS  (50000)
 
-/* ---------------- 音量标定 (为"服务器无响应"判定做准备) ----------------
- * 用【本帧音量】区分"用户没说话"(服务器本就不回字, 正常) 和"服务器死了"(该判死)。
- * 标定: 保持 VOICE_LEVEL_LOG_MS=1000 烧录 → 按【录音键】分别试"不说话"和"说话"
- *       → 看 `voice: level=xxx` (安静几十~几百, 说话几千以上) → 取中间值填下面。
- * ⚠️ 残余风险: 持续环境噪声也会超阈值, 所以阈值别定太低。 */
-#define VOICE_LEVEL_LOG_MS   (1000)     /*!< 每秒打印一次当前音量 (0 = 关闭) */
-
-/*! ★ 说话音量阈值 (一帧平均绝对幅度, 0~32767)。标定前是**占位值**:
- *  本版本只用它打印日志, 判死逻辑还没接线 (见下面那段注释)。 */
-#define VOICE_SPEECH_LEVEL   (32767)
-
-/* ---------------- 服务器无响应判定 (待标定后启用) ----------------
- * 逻辑(尚未接线): 若 level >= VOICE_SPEECH_LEVEL 且持续 VOICE_RX_SILENCE_MS,
- * 而这段时间服务器一个字都没回 (需要 UiBridge 记一个 asr_last_ms()) → 判死。
- * ⚠️ 不能用 ws.is_stale() 代替 —— 它的阈值 130 秒(要大于服务器 120s ping),
- *    对十几秒的语音会话永远不触发。 */
-#define VOICE_RX_SILENCE_MS  (5000)     /*!< "有声音"后服务器沉默多久判死 */
+/*! 每秒打一条采音健康汇总 (0 = 关闭)。
+ *  ★ 内容只有 4 个数字: 发送帧数 / 读失败帧数 / 读耗时均值 / GPIO中断累计。
+ *    它们是查音频链路的唯一抓手 —— 当初"发=25 读失败=0 读耗时均=37ms"这组数据
+ *    才让我们确认接地修好之后音频是干净的。
+ *  ⚠️ 这里**不再有音量判定**。原来那套 (VOICE_SPEECH_LEVEL + VOICE_RX_SILENCE_MS)
+ *     是想靠"有声音但服务器不回字"猜服务器死没死 —— 从未接线, 现已删除。
+ *     本轮何时结束, 现在由网关的 {"type":"abroad"} 直接告诉我们 (见 UiBridge::on_abroad),
+ *     比靠音量猜准得多。 */
+#define VOICE_STATS_LOG_MS   (1000)
 
 static inline uint32_t now_ms(void)
 {
@@ -195,19 +187,19 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
     uint32_t read_fail = 0;   //< 读失败被 continue 跳过的帧数 (= 被丢掉的音频)
     uint32_t t_rec     = now_ms();   //< 采音起点 (算单轮时长用)
 
-#if VOICE_LEVEL_LOG_MS > 0
-    uint32_t t_level     = now_ms();
+#if VOICE_STATS_LOG_MS > 0
+    uint32_t t_stats     = now_ms();
     uint32_t last_frames = 0;   //< 上一秒的 frames 快照
     uint32_t last_fails  = 0;   //< 上一秒的 read_fail 快照
     uint32_t read_ms_sum = 0;   //< 本秒 read_frame 累计耗时 (判"有没有余量")
 #endif
 
     while (1) {
-#if VOICE_LEVEL_LOG_MS > 0
+#if VOICE_STATS_LOG_MS > 0
         uint32_t t_read = now_ms();
 #endif
         esp_err_t r = mic.read_frame(pcm, sizeof(pcm), I2S_MIC_FRAME_MS);   //< 收音
-#if VOICE_LEVEL_LOG_MS > 0
+#if VOICE_STATS_LOG_MS > 0
         read_ms_sum += now_ms() - t_read;
 #endif
 
@@ -228,8 +220,8 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
             break;
         }
 
-        /* ★ 边界①: 读失败时 pcm 还是上一帧旧数据 → 既不能发包, 也不能算音量。
-         *   但这**等于丢掉这 40ms 音频**, 以前这里完全静默 → "音频千疮百孔、
+        /* ★ 边界①: 读失败时 pcm 还是上一帧旧数据 → **不能发包**。
+         *   这等于丢掉这 40ms 音频。以前这里完全静默 → "音频千疮百孔、
          *   服务器识别不出东西"这种情况看不见。现在前 1 次 + 每 25 次打一条。 */
         if (r != ESP_OK) {
             read_fail++;
@@ -239,11 +231,11 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
             }
         }
 
-#if VOICE_LEVEL_LOG_MS > 0
+#if VOICE_STATS_LOG_MS > 0
         /* 每秒汇总 —— ★ 位置很关键: 必须在【读失败判断之外】。
          *   否则"读一直在失败"时这条日志一条都打不出来, 正好把最该看的情况藏住了。 */
-        if (now_ms() - t_level >= VOICE_LEVEL_LOG_MS) {
-            t_level = now_ms();
+        if (now_ms() - t_stats >= VOICE_STATS_LOG_MS) {
+            t_stats = now_ms();
             uint32_t sent = frames    - last_frames;
             uint32_t fail = read_fail - last_fails;
             last_frames = frames;
@@ -256,8 +248,7 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
              *   GPIO中断 正常按一次只涨几次~几十; 几百/几千 = 引脚在噪声里翻转 */
             uint32_t avg_read = sent ? (read_ms_sum / sent) : 0;
             read_ms_sum = 0;
-            ESP_LOGI(TAG, "level=%d | 本秒 发送=%u 读失败=%u 帧 (满帧应为 %d), 读耗时均=%ums | GPIO中断累计=%u",
-                     (r == ESP_OK) ? I2sMic::frame_level(pcm, sizeof(pcm) / sizeof(int16_t)) : -1,
+            ESP_LOGI(TAG, "本秒 发送=%u 读失败=%u 帧 (满帧应为 %d), 读耗时均=%ums | GPIO中断累计=%u",
                      (unsigned)sent, (unsigned)fail,
                      1000 / I2S_MIC_FRAME_MS, (unsigned)avg_read,
                      (unsigned)button_edge_isr_count());
@@ -279,7 +270,12 @@ static void voice_session(UiBridge &ub, I2sMic &mic)   //< 执行函数
     /* ⑥ 收尾 —— ★ mic.stop() 在所有退出路径上都必须执行,
      *    否则 I2S 通道一直开着空转, 下轮 mic.start() 也会因已运行而失败 */
     mic.stop();
-    asr.end(WS_SEND_TIMEOUT_MS);
+    /* ★ 检查返回值 —— end 发不出去的话, 网关收不到本轮结束, 只能等超时断开,
+     *   而"final 也就永远不来"(V2 里 final 是收到 end 之后才发的)。
+     *   以前这里返回值直接丢掉, 所以这种失败在板子上完全看不见。 */
+    if (asr.end(WS_SEND_TIMEOUT_MS) != ESP_OK) {
+        ESP_LOGE(TAG, "!!! asr.end 发送失败 —— 网关收不到 end, 本轮 final 不会来");
+    }
 
     /* 判读: 按住 N 秒 → 满帧应为 N*25; 共发明显偏少而读失败很大 = 音频千疮百孔 */
     ESP_LOGI(TAG, "会话结束 (%s), 共发 %u 帧 (=%.1f 秒音频), 读失败丢弃 %u 帧 (=%.1f 秒)",

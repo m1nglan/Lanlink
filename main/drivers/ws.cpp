@@ -133,7 +133,10 @@ void WS::set_handler(const char *type_key, ws_msg_handler_t cb, void *ctx)
         }
     }
     if (m_handler_count >= MAX_HANDLERS) {
-        ESP_LOGE(TAG, "handler 表已满");
+        /* ★ 带上 type 名 —— 否则只看到"表已满"根本不知道丢的是哪条功能。
+         *   (踩过: Llm 注册 partial/reply 后把 error 挤掉, 网关报错不再触发收尾) */
+        ESP_LOGE(TAG, "handler 表已满(上限 %d), 丢弃 type=\"%s\" —— 该功能将无法分发",
+                 (int)MAX_HANDLERS, type_key);
         return;
     }
     m_type_keys[m_handler_count] = type_key;

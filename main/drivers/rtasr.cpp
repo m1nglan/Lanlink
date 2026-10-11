@@ -51,9 +51,14 @@ esp_err_t RtAsr::switch_service(const char *service, uint32_t timeout_ms)
 esp_err_t RtAsr::start(uint32_t timeout_ms)
 {
     if (m_ws == NULL) {
+        ESP_LOGE(TAG, "start: WS 未绑定");
         return ESP_ERR_INVALID_STATE;
     }
     esp_err_t ret = m_ws->send_text("{\"type\":\"start\"}", timeout_ms);
+    /* ★ 打出来: 网关那边到底收没收到 start。服务名一起打 —— 服务不对时
+     *   网关会把它当未知消息, 那就等于白发。 */
+    ESP_LOGI(TAG, "→ start (service=%s, connected=%d): %s",
+             m_ws->get_service(), (int)m_ws->is_connected(), esp_err_to_name(ret));
     if (ret == ESP_OK) {
         s_result[0] = '\0';  /* 新一轮开始,清空累积文字 */
     }
@@ -71,9 +76,23 @@ esp_err_t RtAsr::send_audio(const uint8_t *data, size_t len, uint32_t timeout_ms
 esp_err_t RtAsr::end(uint32_t timeout_ms)
 {
     if (m_ws == NULL) {
+        ESP_LOGE(TAG, "end: WS 未绑定");
         return ESP_ERR_INVALID_STATE;
     }
-    return m_ws->send_text("{\"type\":\"end\"}", timeout_ms);
+    esp_err_t ret = m_ws->send_text("{\"type\":\"end\"}", timeout_ms);
+    /* ★★ 必须打: 网关靠这条 end 才会下发 final 并结束本轮 ASR。
+     *    以前这里返回值直接丢掉 —— 一旦发送失败(比如此刻 !m_connected,
+     *    send_text 会静默返回 ESP_ERR_INVALID_STATE), end 根本没出去,
+     *    网关那边只能干等到超时才断开, 而板子上什么提示都没有。
+     *    ⚠️ 服务名一起打: 若此刻停在 llm 服务(ASR 结束后切过去问 LLM 了),
+     *       这条 end 会被网关当未知消息丢掉 —— 下一轮录音开头会切回 text,
+     *       但如果没切成功, end 就白发。 */
+    ESP_LOGI(TAG, "→ end (service=%s, connected=%d): %s",
+             m_ws->get_service(), (int)m_ws->is_connected(), esp_err_to_name(ret));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "end 发送失败! 网关将收不到本轮结束, 只能等超时断开");
+    }
+    return ret;
 }
 
 /* asr / final 两个回调共用的前半段: 解析 JSON + 取 "text" 字段。

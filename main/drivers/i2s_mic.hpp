@@ -52,11 +52,6 @@ public:
      */
     esp_err_t read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms);
 
-    /*! 一帧的平均绝对幅度 (0 ~ 32767) —— 判"这一帧有没有声音"。纯计算, 不碰硬件。
-     *  用途: 区分"用户没说话"和"服务器不响应" (两者现象都是收不到识别结果)。
-     *  @param samples int16 采样点个数 (不是字节数) */
-    static int frame_level(const int16_t *pcm, size_t samples);
-
     bool is_running(void) const { return m_running; }
 
 private:

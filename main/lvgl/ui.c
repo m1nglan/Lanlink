@@ -505,7 +505,13 @@ void ui_init(void)
     ui_Balance_screen_init();
     ui_Server_screen_init();
     ui____initial_actions0 = lv_obj_create(NULL);
-    lv_disp_load_scr(ui_home);
+
+    /* ★ 开屏屏: ui_main (带加载动画的启动页)。
+     *   ui_main 的 LV_EVENT_SCREEN_LOADED (ui_main.c:19-26) 会播动画, 并在 7000ms 后
+     *   自动 _ui_screen_change → ui_home。所以这里只是"从哪一屏开始"。
+     *   ⚠️ 本文件是 SquareLine 导出物 —— 重新导出会把这里改回 SquareLine 项目里设的
+     *      "Initial screen"。要一劳永逸, 得在 SquareLine 的项目设置里把初始屏设成 ui_main。 */
+    lv_disp_load_scr(ui_main);
 }
 
 void ui_destroy(void)

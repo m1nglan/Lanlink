@@ -28,7 +28,8 @@ typedef void (*llm_stream_cb_t)(const char *text, bool is_final, void *user_ctx)
  *    (与 RtAsr 的差别只是"谁做累积": ASR 是网关做, LLM 是板子做。)
  *
  * 用法: llm.attach(WS::get());  llm.set_stream_callback(cb, NULL);
- *       llm.switch_service("llm", 1000);  llm.chat("...", 1000);
+ *       llm.switch_service(ASK_SERVICE, 0);   // "openclaw" 或 "llm"
+ *       (等 svc_ok 到了再) llm.chat("...", 0);
  * ================================================================ */
 class Llm {
 public:
@@ -39,7 +40,8 @@ public:
     /*! 兼容旧接口: 只在收到 reply(完整回复)时触发 */
     void set_reply_callback(llm_reply_cb_t cb, void *user_ctx);
 
-    /*! 切换服务: "llm" 或 "openclaw",发 {"type":"svc","service":...} */
+    /*! 切换服务: "openclaw"(明岚) 或 "llm"(DeepSeek) —— 两者协议相同,
+     *  换的只是名字。发 {"type":"svc","service":...}, 服务器回 svc_ok 才算切好。 */
     esp_err_t switch_service(const char *service, uint32_t timeout_ms);
     /*! 发对话 {"type":"chat","content":...} */
     esp_err_t chat(const char *content, uint32_t timeout_ms);

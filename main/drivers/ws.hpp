@@ -85,8 +85,11 @@ private:
     void handle_data(const char *payload, int len);   /* 累积缓冲 + 切分完整 JSON */
     void dispatch_msg(const char *msg, int len);      /* 解析单条 JSON 并按 type 分发 */
 
-    /* 处理器表: type_key 精确匹配 */
-    static const int MAX_HANDLERS = 4;
+    /* 处理器表: type_key 精确匹配。
+     * ⚠️ 表满时 set_handler 只打一条日志就【静默丢弃】—— 那个 type 从此再也分发不到,
+     *    表现是"某条功能莫名其妙不工作"(比如 error 没了 → 网关报错不再触发收尾)。
+     *    所以加新 type 时记得一起调大这里。 */
+    static const int MAX_HANDLERS = 8;   /*!< 当前用了 5 个: asr/final(ASR) partial/reply(LLM) error */
     const char *m_type_keys[MAX_HANDLERS] = {};
     ws_msg_handler_t m_handlers[MAX_HANDLERS] = {};
     void *m_ctxs[MAX_HANDLERS] = {};

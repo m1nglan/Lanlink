@@ -6,6 +6,7 @@
 
 #include "business/bus_msg.hpp"
 #include "drivers/rtasr.hpp"
+#include "drivers/llm.hpp"
 
 /* ================================================================
  * UiBridge —— 业务总线单例: 三条队列 + asr 回调接线 + UI 消费端
@@ -30,6 +31,11 @@ public:
      *     (attach + set_result_callback 都把 this 存了进去) → 生命周期必须 = 系统进程。
      *     放栈上或循环里重建 → 回调踩已释放内存。详见 HANDOFF §6 坑#4。 */
     RtAsr& asr(void) { return m_asr; }
+
+    /*! 把一句话发给 LLM (发 {"type":"svc","service":"llm"} + {"type":"chat","content":...})。
+     *  ★ 可在 WS 回调里调 —— 内部只用非阻塞的 send_text (timeout=0 → 最多 1 tick)。
+     *  ★ **不切回 text**: 下一轮录音时 voice_session 开头会自己切回 (它本来就切)。 */
+    bool llm_ask(const char *content);
 
     /* ---------------- 触发接口 (任意上下文可调, 全部非阻塞) ---------------- */
 
@@ -78,6 +84,10 @@ private:
     /*! WS 回调 (跑在 websocket_task, 且持着 client->lock) → 投队列 */
     static void on_asr_result(const char *text, bool is_final, void *ctx);
 
+    /*! WS 回调: LLM 流式文本。Llm 驱动已把增量累积成【完整回复】才回调这里,
+     *  所以本函数同样只做非阻塞投递 (STREAM_LLM)。 */
+    static void on_llm_stream(const char *text, bool is_final, void *ctx);
+
     /*! WS 回调: 服务器确认服务切换完成 → 投 VOICE_SVC_ACKED 唤醒在等的 voice_session。
      *  同 on_asr_result, 跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
     static void on_svc_ok(const char *service, void *ctx);
@@ -86,6 +96,13 @@ private:
      *  code 1(讯飞错误) / 3(音频超过55s) 说明这一轮已废 → 投 VOICE_STOP 让采音收尾,
      *  而不是继续白发音频。跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
     static void on_ws_error(const char *payload, int len, void *ctx);
+
+    /*! WS 回调: 网关的 {"type":"abroad","text":...} —— 讯飞那边的会话已经结束。
+     *  ★ text 为 null  → 本轮到此为止, 投 VOICE_STOP 让采音走【正常收尾】
+     *                    (不是 abort: asr.end 照发, final 还能回来)
+     *  ★ text 为字符串 → 只是提示信息, 投 RESP_STATUS (将来做弹窗用)
+     *  跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
+    static void on_abroad(const char *payload, int len, void *ctx);
 
     bool push_voice_cmd(voice_cmd_t cmd, int32_t arg); 
 
@@ -100,4 +117,5 @@ private:
     volatile bool m_asr_active = false;
 
     RtAsr m_asr;   /*!< 全局常驻实例 (坑#4) */
+    Llm   m_llm;   /*!< 同上: 地址交给了 WS 回调表, 生命周期必须是进程级 */
 };

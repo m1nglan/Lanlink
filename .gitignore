@@ -74,6 +74,10 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# 网关探针的测试产物 (每次跑都会变, 不是源码)
+# tools/*.mjs 和 tools/speech_test.wav 要提交 —— 前者是工具, 后者是 probe4 必需的语音样本
+tools/*.txt
+
 # User-specific configuration files
 *.user
 *.workspace # General workspace files, can be from various tools

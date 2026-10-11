@@ -134,17 +134,6 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
     return ESP_OK;
 }
 
-/* 一帧的平均绝对幅度 (0 ~ 32767)。纯计算, 不碰硬件。
- * [链同] 用途: 判"这一帧有没有声音" —— 区分"用户没说话"和"服务器没响应"。 */
-int I2sMic::frame_level(const int16_t *pcm, size_t samples)
-{
-    if (pcm == nullptr || samples == 0) {
-        return 0;
-    }
-    int32_t acc = 0;
-    for (size_t i = 0; i < samples; i++) {
-        int16_t s = pcm[i];
-        acc += (s < 0) ? -(int32_t)s : (int32_t)s;
-    }
-    return (int)(acc / (int32_t)samples);
-}
+/* （原 I2sMic::frame_level() 已删除 —— 它只为"按音量猜服务器死没死"那套服务,
+ *   而那套从未接线。现在本轮何时结束由网关的 {"type":"abroad"} 直接告知,
+ *   用不着靠音量猜了。见 UiBridge::on_abroad。） */
