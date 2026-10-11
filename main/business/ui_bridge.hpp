@@ -32,11 +32,6 @@ public:
      *     放栈上或循环里重建 → 回调踩已释放内存。详见 HANDOFF §6 坑#4。 */
     RtAsr& asr(void) { return m_asr; }
 
-    /*! 把一句话发给 LLM (发 {"type":"svc","service":"llm"} + {"type":"chat","content":...})。
-     *  ★ 可在 WS 回调里调 —— 内部只用非阻塞的 send_text (timeout=0 → 最多 1 tick)。
-     *  ★ **不切回 text**: 下一轮录音时 voice_session 开头会自己切回 (它本来就切)。 */
-    bool llm_ask(const char *content);
-
     /* ---------------- 触发接口 (任意上下文可调, 全部非阻塞) ---------------- */
 
     /*! 请求开始一轮语音会话 (按下录音键 BTN_REC_PIN, 现为 GPIO2) */
@@ -105,6 +100,14 @@ private:
     static void on_abroad(const char *payload, int len, void *ctx);
 
     bool push_voice_cmd(voice_cmd_t cmd, int32_t arg); 
+
+    /* ---------------- ask_router 的三个注入回调 ----------------
+     * ★ 必须是 static 成员 (ask_router 用 C 风格函数指针, 捕获 lambda 不行);
+     *   内部靠 UiBridge::get() 拿到单例, 所以不需要 ctx。
+     * ★ "什么时候问"这条策略全在 ask_router 里, 这三个只负责"怎么问"。 */
+    static esp_err_t ar_switch_service(const char *service);   /*!< 让 Llm 发 {"type":"svc",...} */
+    static esp_err_t ar_send_chat(const char *content);        /*!< 让 Llm 发 {"type":"chat",...} */
+    static void      ar_show_waiting(const char *text);        /*!< 投一条占位文字到 stream_q */
 
     QueueHandle_t m_voice_q  = nullptr;
     QueueHandle_t m_resp_q   = nullptr;

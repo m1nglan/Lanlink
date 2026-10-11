@@ -19,8 +19,32 @@ static const char *TAG = "lvgl";
 /* ------------------ 参数 ------------------ */
 #define LVGL_SPI_HOST       (SPI2_HOST)
 #define LVGL_TICK_PERIOD_MS (2)
-#define LVGL_RENDER_FULL    (1)         /*!< 1=双整屏缓冲(FULL), 0=partial 行缓冲 */
-#define LVGL_BUF_IN_PSRAM   (1)         /*!< 1=绘图缓冲放 PSRAM (需 SPI2+GDMA 直读, 自动 cache sync), 0=内部 DMA SRAM */
+/* 绘图缓冲的两种模式:
+ *
+ *   FULL=1  双整屏 —— 每帧都把【整屏】重画+传出去, 哪怕只有一个字变了。
+ *           实测 lv_timer_handler() 约 137ms(≈7FPS)。
+ *   FULL=0  partial —— **只重画/只传【脏区】**。这是我们要的。
+ *
+ * ★ 40MHz 的 SPI 传整屏 106KB 要 21.7ms, 所以 FULL 模式光是传输就吃掉大半预算;
+ *   partial 只传脏区, 传输量按脏区面积缩小。
+ *
+ * ★★ partial 的 band 高度为什么取【整屏高】而不是小块 (LVGL_PARTIAL_LINES = V_RES):
+ *
+ *   partial 是按 band 逐条 flush 的。band 取小了 (比如 40 行) 会有【果冻】:
+ *     band1 发出后动画已经推进 → band1 是帧 N, band5 可能已是帧 N+2
+ *     → 屏幕上同时存在几个时刻的画面 ✗ (转屏动画时整屏都是脏区, 5 个 band, 最明显)
+ *
+ *   取到整屏高之后:
+ *     · 脏区够大时 → 一次装下 → **一次 flush = 一个快照** → 果冻消失 ✓
+ *     · 脏区小时   → **仍然只渲染那几百像素** (不像 FULL 要整屏重来) → 提速保留 ✓
+ *
+ *   ⚠️ 代价: 缓冲回到 320*170*2 = 106KB x2 = 212KB (PSRAM, 8MB 富余, 不是问题)。
+ *   ⚠️ 若仍见撕裂/果冻, 就把 LVGL_RENDER_FULL 调回 1 退回双整屏。 */
+#define LVGL_RENDER_FULL    (0)
+#define LVGL_BUF_IN_PSRAM   (1)         /*!< 1=绘图缓冲放 PSRAM (SPI2+GDMA 直读, 自动 cache sync);
+                                            0=内部 DMA SRAM。
+                                            ★ 放内部 SRAM 渲染更快 (LVGL 每像素写 PSRAM 比写 SRAM 慢),
+                                              但缓冲有 106KB, 内部 SRAM 装不下 → **别改成 0**。 */
 #define LVGL_TASK_PRIO      (2)
 #define LVGL_TASK_STACK     (6 * 1024)
 #define LVGL_TASK_CORE      (1)         /*!< CPU1 (网络 ws_task 在 CPU0) */
@@ -112,12 +136,14 @@ esp_err_t lvgl_port_init(void)
     }
 
     /* 4. 绘图缓冲: FULL=双整屏 320*170*2 ≈106KB x2; PSRAM=1 时放 PSRAM
-     *    (SPI2 + GDMA 直读, 驱动自动 cache sync/对齐) */
+     *    (SPI2 + GDMA 直读, 驱动自动 cache sync/对齐)
+     *    ★ partial 的 band 高度取【整屏高】—— 理由见文件上方 LVGL_RENDER_FULL 那段注释
+     *      (取小了会在转屏动画时出现"果冻": band 之间动画已推进, 屏幕上拼了不同帧)。 */
 #if LVGL_RENDER_FULL
     size_t buf_sz = LCD_H_RES * LCD_V_RES * sizeof(lv_color16_t);
     lv_display_render_mode_t render_mode = LV_DISPLAY_RENDER_MODE_FULL;
 #else
-    #define LVGL_PARTIAL_LINES (40)
+    #define LVGL_PARTIAL_LINES (LCD_V_RES)   /*!< = 170, 一次装下整个脏区 */
     size_t buf_sz = LCD_H_RES * LVGL_PARTIAL_LINES * sizeof(lv_color16_t);
     lv_display_render_mode_t render_mode = LV_DISPLAY_RENDER_MODE_PARTIAL;
 #endif

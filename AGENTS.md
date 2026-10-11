@@ -57,8 +57,14 @@ idf.py build        # 构建
 idf.py flash monitor
 ```
 
-⚠️ **新增源文件后必须 `touch main/CMakeLists.txt`**：`SRC_DIRS` 用 `file(GLOB)` 只在 CMake 配置阶段扫描，
-不 touch 则新文件不参与编译，报链接期 `undefined reference`。
+⚠️ **新增源文件后必须刷新 `main/CMakeLists.txt` 的时间戳**：`SRC_DIRS` 用 `file(GLOB)` 只在 CMake
+配置阶段扫描，不刷新则新文件不参与编译，报链接期 `undefined reference`。
+
+```powershell
+(Get-Item main\CMakeLists.txt).LastWriteTime = Get-Date    # ← Windows 上要用这个
+```
+
+⚠️ **`touch` 在这台机器（Windows PowerShell）上不存在** —— 照着 Unix 的写法敲会报"无法识别 touch"。
 
 ## 代码结构与约定
 

@@ -1,7 +1,13 @@
 # Lanlink 交接文档（Handoff）
 
 > 本文件是**接手本项目的入口**。先读这里，再按需读文末「文档索引」。
-> 最后更新：**阶段 0 / 1 / 2 / 3 全部完成并上机验证**，只剩**阶段 4（清理加固）**。
+>
+> ## ⚠️ 本文件只服务于本次架构重构 —— 后续分支请看 [`CHAIN.md`](CHAIN.md) 和 [`../README.md`](../README.md)
+> 本次重构（阶段 0~4）收尾后，`HANDOFF.md` / `REBUILD.md` 会随分支一起**归档**：
+> 它们记录的是"重构过程中踩过什么坑"，而不是"现在的架构长什么样"。
+> **新架构的完整说明在 [`CHAIN.md`](CHAIN.md)**（分层/职责边界/五条链/队列/全局约束）。
+>
+> 最后更新：**阶段 0 / 1 / 2 / 3 全部完成并上机验证**；**阶段 4 收尾中**（见 §9）。
 > ★★ **协议已升到 V2**（见 [`PROTOCOL.md`](PROTOCOL.md)）：ASR 下行从"增量 `partial`"改成
 > **全量 `{"type":"asr"}`**，`revise` 废除，`partial` 从此只属于 llm/openclaw。**读代码前先看那份。**
 > ★★ **本轮最大的坑是硬件的**：所有"看起来像软件 bug"的现象（按键误报/ISR 风暴/3.3V 被拉低）
@@ -521,6 +527,50 @@ I (x) voice: 会话结束 (正常), 共发 284 帧 (=11.4 秒音频), 读失败�
 | 🐛 **`handle_data` 把每条消息拷到 1KB 栈缓冲，超出就截断** → 改成**在 `m_rx_buf` 里就地分发** | 截断后 `cJSON_Parse` 失败 → **整条消息被静默丢弃**。V2 下 LLM 的 `reply` 可带 2KB 正文 → 必炸。做法：临时把下一个字节改 `\0`、分发完改回（`cJSON_Parse` 内部会复制，安全）。**副产品：给 `websocket_task` 的 4K 栈省掉 1KB** |
 | 🐛 **`voice_session` 的"等连接"循环（最长 15 秒）不消费 `voice_q`** → 抽 `voice_q_drain()` 并在所有等待循环里调用 | 期间 `voice_task` 是 `voice_q` 唯一消费者，一不消费：① 深度只有 4，按几次就满；② **`VOICE_STOP` 也一起丢 → 用户松手被忽略** → 连上后照常录一段用户不要的会话。实测踩过开机 2.4s 打出 `voice_q 满, VOICE_STOP 丢弃` |
 
+### 6-J ★ 本轮新增的两条链 + 一个"靠猜换成靠告知"
+
+**① LLM 转发链（`UiBridge::llm_ask` → openclaw）**
+
+```
+ASR final 到达 (WS 回调, 持 client->lock)
+  → llm_ask(): 存下这句话 + 发 {"type":"svc","service":"openclaw"}     ← 只切服务, 不发 chat
+       ↓ 网关回 svc_ok (实测 31~40ms)
+  → on_svc_ok(): 这才发 {"type":"chat","content":"[Lanlink] <识别文字>"}
+       ↓ 网关回 partial×N (增量) → Llm 驱动【在驱动侧累积】成完整回复 → 回调
+  → post_stream(STREAM_LLM, 完整回复, is_final) → 灰泡(左)
+```
+
+| 关键点 | 为什么 |
+|---|---|
+| **必须等 `svc_ok` 再发 `chat`** | 服务不对时 `chat` 不会被拒绝，而是被网关 **echo 静默吞掉**（探针①实测）→ 现象是"气泡建了却永远没回复"，极难查 |
+| **`ASK_SERVICE` / `ASK_PREFIX` / `ASK_WAIT_TEXT` 三个宏** | 分别是转发目标(`"openclaw"`, 一行可切回 `"llm"`)、前缀(`"[Lanlink] "`)、占位文字(`"(思考中)"`) |
+| **`(思考中)` 占位灰泡** | 明岚调工具时 **3~25 秒**才吐第一个字。占位是发完 `chat` 就投一条 `STREAM_LLM`；真回复一到，`show_llm` 直接覆盖它的文字 —— **不需要删除逻辑** |
+| **`ASK_FINAL_WAIT_MS = 2500` 超时兜底** | 转发主触发点是 `final`。若网关那条路断了，`final` 永远不来 → 永远不问 openclaw，而现象看起来像"灰泡功能坏了"。兜底：2.5 秒没等到就用最后一条 `asr` 顶上。**三条触发路径（final / 兜底 / 下一轮按下时冲出去）共用 `s_asked` 闸，保证一轮只问一次** |
+
+**② 网关 `abroad` 字段（`UiBridge::on_abroad`）**
+
+```json
+{"type":"abroad","text":"<已识别内容>"}   或   {"type":"abroad","text":null}
+```
+
+**用途**：讯飞在**长时间没有有效语音**时会自己关掉识别会话（**单次上传超 50 秒是讯飞硬要求**）。
+那一刻起网关不会再下 `final`，板子却还在傻采音。
+
+| 收到 | 板子做什么 |
+|---|---|
+| `text` 有内容（**可能是一整段话**）| 先 `post_stream(STREAM_ABROAD, text, true)` 上屏，**再**收尾 |
+| `text = null` 或空串 | 直接收尾 |
+
+**★ 一律【立刻结束本轮】，不管 `text` 是什么、也不管用户松没松开** —— 会话已经死了，继续按着说的每一句都进不了识别。
+**★ 上屏必须走 `stream_q`**（新加的第三个 `stream_kind_t`）：`resp_q` 的 `u.text` 只有 **64 字节**（≈21 汉字），一整段话会被截掉大半。
+
+**③ 两处"靠猜"改成"靠告知"**
+
+| 原来 | 现在 |
+|---|---|
+| 50 秒本地硬上限是**唯一**的兜底 | 网关 `abroad` 主动通知，**50 秒上限降级为最后防线**（但**必须保留 —— 讯飞硬要求**）|
+| `VOICE_SPEECH_LEVEL` + `VOICE_RX_SILENCE_MS`：靠"有声音但服务器不回字"**猜**服务器死没死 | **从未接线，本轮全部删除**（连 `I2sMic::frame_level()` 一起）。`voice.cpp` 只剩每秒一条采音健康汇总 |
+
 ### 已确认可用的重载/配置
 
 - `ui_chat` 屏的控件树（**本轮用户重新设计过**，见 §6-F）：`ui_contextpanel`(flex column 容器)
@@ -598,22 +648,37 @@ I (x) voice: 会话结束 (正常), 共发 284 帧 (=11.4 秒音频), 读失败�
   7. **按下后立刻松开**（不说话）→ 小绿气泡出现后**自己消失**（空气泡被删）
   8. 按**服务键（GPIO42）** → 只有一条日志，**不投任何队列**
   9. 拔网线 → `status=1`(DISCONNECTED) → `status=2`(RECONNECTING) → 插回 → `status=0`(CONNECTED)
-     **待实测**：拔网线录音 → ABORTED + `ws_keeper` 重连 → 再按可开新会话
+     ✅ **已验证**：拔网线录音 → ABORTED + `ws_keeper` 重连 → 再按可开新会话
   10. **快速点按**（按下即松）→ `voice: 等 svc_ok 期间用户已松手 (快速点按), 本轮取消`，不崩、不留残留会话
-  11. **待实测**：按住录音键**超过 50 秒**不说话 → `已达单轮上限 50 秒, 自动收尾` → 仍能收到 `final`
-  12. **待实测**：录音过程中转编码器 —— UI 是否仍不卡
-  13. `voice: level=xxx | 本秒 发送=25 读失败=0 ...` —— 每秒一条，**健康值判读见 §6-H**；
-      同时用于标定 `VOICE_SPEECH_LEVEL`
-- 📌 **阶段 3 已完成**（真采音 + 上屏都做完了，见 §3 各阶段成果）。**遗留一项未接线**：
-  "服务器无响应判定"（逻辑已写在 `voice.cpp` 注释里，只差 `VOICE_SPEECH_LEVEL` 阈值标定
-  + `UiBridge::asr_last_ms()`）。
-- 📌 **阶段 4 待做（清理加固）**：
-  - `rtasr.cpp` 的 `printf` **已降级为 `ESP_LOGD`** ✓（本轮做完）
-  - `queue` 是否改 `xQueueCreateStatic` + PSRAM（现在只有 3304 B，优先级已降低）
-  - `UiBridge` 拆分（总线层 / 映射层）—— 上屏代码进来后 `ui_bridge.cpp` 变长了
-  - **渲染提速**（见文末"UI 性能"）
-  - 删留档代码（`app_fsm.*.txt` / `button.*.txt`）
-  - ✅ **已做完**：`HANDOFF.md` / `REBUILD.md` / `PROTOCOL.md` 的 V2 同步
+  11. ⛔ **测不了**：按住录音键超过 50 秒。**讯飞硬要求单次上传不超过 50 秒音频**，
+      它会先自主关闭会话 → 由网关的 `{"type":"abroad"}` 通知板子（见 §6-J）。
+      **50 秒本地上限必须保留，不要删。**
+  12. ✅ **已验证**：录音中转编码器 —— 日志可见 `编码器输入 已暂停/已恢复`，
+      暂停期间转的格数被丢弃、不攒（`lvgl_port_set_encoder_enabled`）
+  13. `voice: 本秒 发送=25 读失败=0 ...` —— 每秒一条采音健康汇总，**判读见 §6-H**。
+      （**已没有 `level=` 音量字段**：那套"按音量猜服务器死没死"的判定从未接线，
+        本轮连同 `VOICE_SPEECH_LEVEL` / `VOICE_RX_SILENCE_MS` / `I2sMic::frame_level()`
+        一起删除 —— 会话是否结束现在由网关的 `abroad` 直接告知，不用猜。）
+- 📌 **阶段 3 已完成**（真采音 + 上屏 + LLM 转发链都做完了，见 §3 各阶段成果）。
+- 📌 **阶段 4（清理加固）—— 已完成**：
+  - `rtasr.cpp` 的 `printf` 降级为 `ESP_LOGD` ✓
+  - **结构分离** ✓ —— `chat_view`（气泡，564 行）进了 `main/display/`；
+    `ask_router`（转发策略，207 行）进了 `main/business/`。
+    `ui_bridge.cpp` **903 → 467 行**，只剩"总线 + 回调接线 + 会话控制 + 消费分发"，
+    **不再认识 `openclaw` 这个名字、不再持有任何 ask 状态**。分层与职责边界见 [`CHAIN.md`](CHAIN.md)。
+  - **渲染提速** ✓ —— `LVGL_RENDER_FULL` 1→0（FULL 双整屏 → partial 40 行）。
+    缓冲 106KB×2 → 25.6KB×2，**只重画脏区**而不是整屏。
+    ⚠️ partial 的代价是极端快速滚动可能撕裂；真看到先把 `LVGL_BUF_IN_PSRAM` 调回 1 试。
+  - **聊天历史** ✓ —— PSRAM 环形缓冲（`CHAT_RING_SLOTS` 条，满了覆盖最老的）。
+    **存的是纯文本 + 谁说的，不是 LVGL 指针**（对象换屏即销毁）；聊天屏重建时 `ring_replay()` 重放。
+    以后接 TF 卡只需换掉 `chat_view.cpp` 里 `ring_*` 那几个函数的实现。
+  - **`CHAT_TEXT_IN_PSRAM` 打开 + 条件编译宏删掉** ✓ —— 气泡文字统一走 PSRAM + `set_text_static`，
+    只有一条路，没有 `#if` 分支了。
+  - `queue` 改 `xQueueCreateStatic` + PSRAM —— **不做**（现在只有 3304 B，收益不抵风险）
+  - 删留档代码（`app_fsm.*.txt` / `button.*.txt`）—— **用户自己处理**
+  - ✅ `HANDOFF.md` / `REBUILD.md` / `PROTOCOL.md` 的 V2 同步
+- 📌 **⚠️ 本文件与 `REBUILD.md` 随本次重构收尾而归档** —— 它们记的是"重构过程中踩过什么坑"，
+  **新架构的说明在 [`CHAIN.md`](CHAIN.md)**，后续分支以 [`../README.md`](../README.md) 为主。
 - 📌 **已知行为（未改，用户明确要求先不动）**：`lv_indev_read()` 在屏幕动画期间
   （`prev_scr != NULL`，约 500ms）会在调 `read_cb` **之前** return，所以动画期间转的跳变会
   **攒在 `s_accum` 里**，动画结束后一次结算 → `enc_diff` 可能是十几格 → `indev_encoder_proc`
