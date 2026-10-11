@@ -7,7 +7,7 @@
  * [链] 【ws_keeper_task】→ WS::is_connected / is_stale / reconnect / send_ping
  *      → post_resp_status(RESP_WS_STATUS) → resp_q → drain_queues
  * 只干三件事: ① 首次建连  ② 断线/死连接重连  ③ 应用层 ping 保活
- * 不干的: 发 start/音频/end → voice_task; LLM 阶段机 → llm_chain.hpp; 服务键 → main.cpp。
+ * 不干的: 发 start/音频/end → voice_task; 识别结果转发 → ask_router; 服务键 → main.cpp。
  * ★★ **重连后故意不切服务**: 切服务和发 start 现同在 voice_task 顺序执行、中间隔
  *    svc_ok 握手 → "语音过去了服务还没切"不可能发生。顺带: VOICE_SVC_ACKED 的唯一
  *    生产者变成 voice_session 自己, 不会被重连的确认误唤醒。
