@@ -8,14 +8,18 @@
  * ★ 全部函数只能在 **LVGL 任务上下文**调用 (由 UiBridge::drain_queues 驱动)。
  *   内部不碰队列、不碰锁 —— LVGL 锁由调用方持有。
  * ★ 控件结构 (属性要与 SquareLine 导出一致):
- *     ui_contextpanel(flex column, 可滚) → roll(wrapper) → panel(气泡) → label(文字)
+ *     ui_contextPanel(flex column, 可滚) → roll(wrapper) → panel(气泡) → label(文字)
+ *   ⚠️ 名字是 SquareLine 导出给的: 大驼峰 `contextPanel` / 小写 `resrollpanel`
+ *      (不是全小写的 contextpanel / resrollpane —— 改 UI 时如果又改名, 这里要跟着改)
  * ================================================================ */
 
 namespace chat_view {
 
 /*! 每轮调一次 (幂等): 同步屏幕状态 ——
- *  不在聊天屏就清空记录; 聊天屏被重建过就清空旧指针 + 删掉 SquareLine 预置的占位气泡。
- *  @return false = 当前不在聊天屏, 调用者不该继续操作气泡。
+ *  面板不存在就清空记录; 首次进屏时清空旧指针 + 删掉 SquareLine 预置的占位气泡。
+ *  @return false = 拿不到 ui_contextPanel (没有可用的父对象), 调用者不该继续操作气泡。
+ *          ★ 注意返回值【不代表"在不在聊天屏"】: 新版导出在 ui_init() 里就把聊天屏
+ *            建好了 (ui.c:549) 且永不销毁, 所以面板从开机起就存在 —— 见 sync_screen 的说明。
  *          (模块内部的上屏函数都会拿它做闸; drain_queues 直接忽略返回值即可) */
 bool sync_screen(void);
 

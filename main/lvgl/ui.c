@@ -19,7 +19,8 @@ lv_anim_t * loading_Animation(lv_obj_t * TargetObject, int delay);
 lv_anim_t * longingext_Animation(lv_obj_t * TargetObject, int delay);
 lv_anim_t * wind_Animation(lv_obj_t * TargetObject, int delay);
 lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay);
-lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay);
+lv_anim_t * choosemode_Animation(lv_obj_t * TargetObject, int delay);
+lv_anim_t * openmessage_Animation(lv_obj_t * TargetObject, int delay);
 
 // EVENTS
 lv_obj_t * ui____initial_actions0;
@@ -465,7 +466,7 @@ lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay)
 
     return out_anim;
 }
-lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay)
+lv_anim_t * choosemode_Animation(lv_obj_t * TargetObject, int delay)
 {
     lv_anim_t * out_anim;
     ui_anim_user_data_t * PropertyAnimation_0_user_data = lv_malloc(sizeof(ui_anim_user_data_t));
@@ -473,11 +474,11 @@ lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay)
     PropertyAnimation_0_user_data->val = -1;
     lv_anim_t PropertyAnimation_0;
     lv_anim_init(&PropertyAnimation_0);
-    lv_anim_set_duration(&PropertyAnimation_0, 1);
+    lv_anim_set_duration(&PropertyAnimation_0, 600);
     lv_anim_set_user_data(&PropertyAnimation_0, PropertyAnimation_0_user_data);
-    lv_anim_set_custom_exec_cb(&PropertyAnimation_0, _ui_anim_callback_set_width);
-    lv_anim_set_values(&PropertyAnimation_0, 180, 0);
-    lv_anim_set_path_cb(&PropertyAnimation_0, lv_anim_path_linear);
+    lv_anim_set_custom_exec_cb(&PropertyAnimation_0, _ui_anim_callback_set_height);
+    lv_anim_set_values(&PropertyAnimation_0, 0, 100);
+    lv_anim_set_path_cb(&PropertyAnimation_0, lv_anim_path_ease_out);
     lv_anim_set_delay(&PropertyAnimation_0, delay + 0);
     lv_anim_set_deleted_cb(&PropertyAnimation_0, _ui_anim_callback_free_user_data);
     lv_anim_set_reverse_duration(&PropertyAnimation_0, 0);
@@ -486,6 +487,48 @@ lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay)
     lv_anim_set_repeat_delay(&PropertyAnimation_0, 0);
     lv_anim_set_early_apply(&PropertyAnimation_0, false);
     out_anim = lv_anim_start(&PropertyAnimation_0);
+
+    return out_anim;
+}
+lv_anim_t * openmessage_Animation(lv_obj_t * TargetObject, int delay)
+{
+    lv_anim_t * out_anim;
+    ui_anim_user_data_t * PropertyAnimation_0_user_data = lv_malloc(sizeof(ui_anim_user_data_t));
+    PropertyAnimation_0_user_data->target = TargetObject;
+    PropertyAnimation_0_user_data->val = -1;
+    lv_anim_t PropertyAnimation_0;
+    lv_anim_init(&PropertyAnimation_0);
+    lv_anim_set_duration(&PropertyAnimation_0, 500);
+    lv_anim_set_user_data(&PropertyAnimation_0, PropertyAnimation_0_user_data);
+    lv_anim_set_custom_exec_cb(&PropertyAnimation_0, _ui_anim_callback_set_width);
+    lv_anim_set_values(&PropertyAnimation_0, 0, 310);
+    lv_anim_set_path_cb(&PropertyAnimation_0, lv_anim_path_ease_out);
+    lv_anim_set_delay(&PropertyAnimation_0, delay + 0);
+    lv_anim_set_deleted_cb(&PropertyAnimation_0, _ui_anim_callback_free_user_data);
+    lv_anim_set_reverse_duration(&PropertyAnimation_0, 0);
+    lv_anim_set_reverse_delay(&PropertyAnimation_0, 0);
+    lv_anim_set_repeat_count(&PropertyAnimation_0, 0);
+    lv_anim_set_repeat_delay(&PropertyAnimation_0, 0);
+    lv_anim_set_early_apply(&PropertyAnimation_0, false);
+    out_anim = lv_anim_start(&PropertyAnimation_0);
+    ui_anim_user_data_t * PropertyAnimation_1_user_data = lv_malloc(sizeof(ui_anim_user_data_t));
+    PropertyAnimation_1_user_data->target = TargetObject;
+    PropertyAnimation_1_user_data->val = -1;
+    lv_anim_t PropertyAnimation_1;
+    lv_anim_init(&PropertyAnimation_1);
+    lv_anim_set_duration(&PropertyAnimation_1, 500);
+    lv_anim_set_user_data(&PropertyAnimation_1, PropertyAnimation_1_user_data);
+    lv_anim_set_custom_exec_cb(&PropertyAnimation_1, _ui_anim_callback_set_height);
+    lv_anim_set_values(&PropertyAnimation_1, 0, 160);
+    lv_anim_set_path_cb(&PropertyAnimation_1, lv_anim_path_ease_out);
+    lv_anim_set_delay(&PropertyAnimation_1, delay + 0);
+    lv_anim_set_deleted_cb(&PropertyAnimation_1, _ui_anim_callback_free_user_data);
+    lv_anim_set_reverse_duration(&PropertyAnimation_1, 0);
+    lv_anim_set_reverse_delay(&PropertyAnimation_1, 0);
+    lv_anim_set_repeat_count(&PropertyAnimation_1, 0);
+    lv_anim_set_repeat_delay(&PropertyAnimation_1, 0);
+    lv_anim_set_early_apply(&PropertyAnimation_1, false);
+    out_anim = lv_anim_start(&PropertyAnimation_1);
 
     return out_anim;
 }
@@ -500,32 +543,29 @@ void ui_init(void)
     lv_theme_t * theme = lv_theme_default_init(dispp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED),
                                                true, LV_FONT_DEFAULT);
     lv_disp_set_theme(dispp, theme);
-    ui_home_screen_init();
     ui_main_screen_init();
     ui_Balance_screen_init();
     ui_Server_screen_init();
+    ui_chat_screen_init();
+    ui_home_screen_init();
     ui____initial_actions0 = lv_obj_create(NULL);
-
-    /* ★ 开屏屏: ui_main (带加载动画的启动页)。
-     *   ui_main 的 LV_EVENT_SCREEN_LOADED (ui_main.c:19-26) 会播动画, 并在 7000ms 后
-     *   自动 _ui_screen_change → ui_home。所以这里只是"从哪一屏开始"。
-     *   ⚠️ 本文件是 SquareLine 导出物 —— 重新导出会把这里改回 SquareLine 项目里设的
-     *      "Initial screen"。要一劳永逸, 得在 SquareLine 的项目设置里把初始屏设成 ui_main。 */
     lv_disp_load_scr(ui_main);
 }
 
 void ui_destroy(void)
 {
-    ui_home_screen_destroy();
     ui_main_screen_destroy();
     ui_Balance_screen_destroy();
     ui_Server_screen_destroy();
+    ui_chat_screen_destroy();
+    ui_home_screen_destroy();
 }
 
 void ui_relocalize(void)
 {
-    ui_home_screen_relocalize();
     ui_main_screen_relocalize();
     ui_Balance_screen_relocalize();
     ui_Server_screen_relocalize();
+    ui_chat_screen_relocalize();
+    ui_home_screen_relocalize();
 }

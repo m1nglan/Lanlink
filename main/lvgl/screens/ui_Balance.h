@@ -16,14 +16,14 @@ extern void ui_Balance_screen_destroy(void);
 extern void ui_Balance_screen_relocalize(void);
 extern void ui_event_Balance(lv_event_t * e);
 extern lv_obj_t * ui_Balance;
-extern lv_obj_t * ui_top;
 extern lv_obj_t * ui_deeplogo;
-extern lv_obj_t * ui_balico;
-extern lv_obj_t * ui_balancetop;
 extern lv_obj_t * ui_banancePanel;
 extern lv_obj_t * ui_baltext;
 extern lv_obj_t * ui_balancenum;
 extern lv_obj_t * ui_balicon;
+extern lv_obj_t * ui_top4;
+extern lv_obj_t * ui_chatico4;
+extern lv_obj_t * ui_chattop4;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

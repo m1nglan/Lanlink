@@ -19,11 +19,11 @@ extern "C" {
 
 ///////////////////// SCREENS ////////////////////
 
-#include "screens/ui_home.h"
 #include "screens/ui_main.h"
 #include "screens/ui_Balance.h"
 #include "screens/ui_Server.h"
 #include "screens/ui_chat.h"
+#include "screens/ui_home.h"
 
 ///////////////////// VARIABLES ////////////////////
 
@@ -39,16 +39,14 @@ extern lv_anim_t * loading_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * longingext_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * wind_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay);
-extern lv_anim_t * panelclose_Animation(lv_obj_t * TargetObject, int delay);
+extern lv_anim_t * choosemode_Animation(lv_obj_t * TargetObject, int delay);
+extern lv_anim_t * openmessage_Animation(lv_obj_t * TargetObject, int delay);
 
 // EVENTS
 
 extern lv_obj_t * ui____initial_actions0;
 
 // IMAGES AND IMAGE SETS
-LV_IMG_DECLARE(ui_img_penggang_png);    // assets/penggang.png
-LV_IMG_DECLARE(ui_img_frame_00_png);    // assets/frame_00.png
-LV_IMG_DECLARE(ui_img_1926284110);    // assets/temperature-celsius.png
 LV_IMG_DECLARE(ui_img_lan_png);    // assets/lan.png
 LV_IMG_DECLARE(ui_img_lighting_png);    // assets/lighting.png
 LV_IMG_DECLARE(ui_img_link_png);    // assets/link.png
@@ -56,8 +54,12 @@ LV_IMG_DECLARE(ui_img_loading_png);    // assets/loading.png
 LV_IMG_DECLARE(ui_img_deepseek_png);    // assets/DeepSeek.png
 LV_IMG_DECLARE(ui_img_balance_png);    // assets/balance.png
 LV_IMG_DECLARE(ui_img_1230237158);    // assets/server-36.png
-LV_IMG_DECLARE(ui_img_1529199040);    // assets/logo2-96.png
 LV_IMG_DECLARE(ui_img_message_png);    // assets/message.png
+LV_IMG_DECLARE(ui_img_penggang_48_png);    // assets/penggang_48.png
+LV_IMG_DECLARE(ui_img_2034640467);    // assets/logo2-96_48.png
+LV_IMG_DECLARE(ui_img_bg_png);    // assets/bg.png
+LV_IMG_DECLARE(ui_img_1926284110);    // assets/temperature-celsius.png
+LV_IMG_DECLARE(ui_img_frame_00_png);    // assets/frame_00.png
 LV_IMG_DECLARE(ui_img_lighting_1_png);    // assets/lighting_1.png
 LV_IMG_DECLARE(ui_img_lighting_2_png);    // assets/lighting_2.png
 LV_IMG_DECLARE(ui_img_lighting_3_png);    // assets/lighting_3.png
@@ -86,10 +88,10 @@ LV_IMG_DECLARE(ui_img_wind_6_png);    // assets/wind_6.png
 // FONTS
 LV_FONT_DECLARE(ui_font_balance22);
 LV_FONT_DECLARE(ui_font_ch14);
-LV_FONT_DECLARE(ui_font_date22);
-LV_FONT_DECLARE(ui_font_icon18);
-LV_FONT_DECLARE(ui_font_time40);
-LV_FONT_DECLARE(ui_font_time64);
+LV_FONT_DECLARE(ui_font_date18);
+LV_FONT_DECLARE(ui_font_icon30);
+LV_FONT_DECLARE(ui_font_time25);
+LV_FONT_DECLARE(ui_font_time52);
 LV_FONT_DECLARE(ui_font_updown10);
 LV_FONT_DECLARE(ui_font_weather18);
 

@@ -7,7 +7,7 @@
 #include "esp_heap_caps.h"
 
 #include "lvgl.h"
-#include "ui.h"              /* ui_contextpanel / ui_merollpanel / ui_resrollpane / ui_font_ch14 */
+#include "ui.h"              /* ui_contextPanel / ui_merollpanel / ui_resrollpanel / ui_font_ch14 */
 
 static const char *TAG = "chat_view";
 
@@ -35,7 +35,7 @@ namespace chat_view {
  *          → tick     (宽限期到期才真收尾)
  *   ★ 以上全部由 drain_queues 在 lvgl 任务里驱动, 且先过 sync_screen。
  *
- * 控件三层 (属性要与 SquareLine 一致): ui_contextpanel(flex column, 可滚)
+ * 控件三层 (属性要与 SquareLine 一致): ui_contextPanel(flex column, 可滚)
  *      → roll(wrapper) → panel(气泡) → label(文字)
  * ★ wrapper 的意义: flex 的交叉轴对齐是**整容器一个值**, 做不到"我的靠右"。
  *   wrapper 是 flex 孩子(x/y/align 失效), panel 的父 wrapper 无 layout → align 生效
@@ -81,16 +81,26 @@ static uint32_t  s_end_ms = 0;
  * 用途: 文字到达时若气泡已被收尾【就不要新建】—— 那正是"冒第二个气泡"的来源。 */
 static bool      s_asr_active = false;
 
-/* 上次记录的那些指针属于哪个 contextpanel —— 用来识别"聊天屏被销毁重建了" */
+/* 上次挂钩的是哪个 contextPanel —— 用来做【一次性初始化】(删占位气泡)。
+ * ⚠️ 原来它还兼"屏幕重建检测", 但现在的导出**离开聊天屏不销毁** →
+ *    ui_contextPanel 指针从头到尾不变 → 这个判断只在开机第一次成立。 */
 static lv_obj_t *s_ctx_hooked = NULL;
 
 /* ================================================================
- * 环形缓冲 —— 让气泡内容在【聊天屏被销毁重建】之后还能重放出来
+ * 环形缓冲 —— 历史消息的文本备份
  *
- * ★ 为什么需要: SquareLine 的聊天屏**离开即销毁** —— 一换屏, ui_contextpanel
- *   连同下面所有气泡全没了, 我们手里的指针也全悬空。再回来时屏幕是空的,
- *   之前说过的话一句都不在。这里存一份【纯文本】, 回来时照着重放一遍。
- * ★ 存的是文本 + 谁说的, **不是 LVGL 对象指针** —— 对象都销毁了, 存指针必踩悬空。
+ * ⚠️ **当前它基本处于"休眠"状态** —— 说清楚免得误会:
+ *
+ *   ① 旧导出: 聊天屏**离开即销毁** (LV_EVENT_SCREEN_UNLOADED), 一换屏气泡全没,
+ *      靠这里存纯文本, 回来时 ring_replay() 重放。
+ *   ② 现导出: 聊天屏**开机就建 + 永不销毁** → 面板一直在 → 气泡也一直在
+ *      → 换屏回来消息本来就还在, **根本不需要重放**。
+ *
+ *   ⇒ 所以现在 ring_replay() 只在开机那一次跑 (缓冲是空的, 无操作), 
+ *     ring_append/ring_update 照常记录 —— 相当于【保险】:
+ *     万一以后 SquareLine 又把"离开时销毁"勾回来, 这套仍然能工作。
+ *
+ * ★ 存的是文本 + 谁说的, **不是 LVGL 对象指针** —— 对象可能被销毁, 存指针会悬空。
  * ★ 容量固定 (CHAT_RING_SLOTS), 满了覆盖最老的。当前放 PSRAM (8MB 富余);
  *   以后接 TF 卡之类的外部存储时, 换掉 ring_* 这几个函数的实现即可。
  * ================================================================ */
@@ -228,8 +238,8 @@ static void ring_update(int slot, const char *text)
 static lv_obj_t *add_bubble(const char *text, bool is_me)
 {
     /* ---- 1. wrapper (flex 孩子) ---- */
-    lv_obj_t *roll = lv_obj_create(ui_contextpanel);
-    lv_obj_set_width(roll, is_me ? 310 : 314);
+    lv_obj_t *roll = lv_obj_create(ui_contextPanel);
+    lv_obj_set_width(roll, is_me ? 311 : 314);   /* 和 ui_merollpanel(311) / ui_resrollpanel(314) 一致 */
     lv_obj_set_height(roll, LV_SIZE_CONTENT);
     lv_obj_remove_flag(roll, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_radius(roll, 0, 0);
@@ -237,13 +247,16 @@ static lv_obj_t *add_bubble(const char *text, bool is_me)
     lv_obj_set_style_border_opa(roll, 0, 0);
     lv_obj_set_style_pad_all(roll, 0, 0);
     if (!is_me) {
-        lv_obj_set_style_pad_left(roll, 5, 0);   /* 和 ui_resrollpane 一致 */
+        lv_obj_set_style_pad_left(roll, 5, 0);   /* 和 ui_resrollpanel 一致 */
     }
 
     /* ---- 2. 气泡 (align 在这里生效) ---- */
     lv_obj_t *panel = lv_obj_create(roll);
     lv_obj_set_size(panel, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_align(panel, is_me ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT);
+    /* ★ 和模板一致: 我的 RIGHT_MID (靠右居中), 对方的 LEFT_MID (靠左居中)。
+     *   wrapper 高度是 SIZE_CONTENT = 气泡自身高度 → 没有纵向余量, 所以 MID 和 TOP 等价;
+     *   但保持和 SquareLine 预览同一个值, 以后谁改了模板都对得上。 */
+    lv_obj_set_align(panel, is_me ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID);
     lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(panel, lv_color_hex(is_me ? 0x35D28D : 0x2F2F30), 0);
     lv_obj_set_style_bg_opa(panel, 255, 0);
@@ -251,7 +264,7 @@ static lv_obj_t *add_bubble(const char *text, bool is_me)
     lv_obj_set_style_pad_left(panel, 8, 0);
     lv_obj_set_style_pad_right(panel, 8, 0);
     lv_obj_set_style_pad_top(panel, 6, 0);
-    lv_obj_set_style_pad_bottom(panel, 6, 0);
+    lv_obj_set_style_pad_bottom(panel, 3, 0);    /* 模板从 6 改成了 3 */
     /* ★ 这里【故意不设 radius】—— 和 SquareLine 导出的 ui_mepanel 一致: 样例也没设,
      *   走主题默认 (lv_theme_default.c:27 的 RADIUS_DEFAULT, 随 DPI 缩放)。
      *   自己写死一个数就和 SquareLine 预览不一致了。 */
@@ -259,7 +272,10 @@ static lv_obj_t *add_bubble(const char *text, bool is_me)
     /* ---- 3. 文字 (默认已是 LV_LABEL_LONG_WRAP, 见 lv_label.c:748) ---- */
     lv_obj_t *label = lv_label_create(panel);
     lv_obj_set_size(label, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_width(label, 280, 0);
+    /* ★ 换行靠这条: 宽度到 240 就再也长不动 → WRAP 折行。
+     *   和模板的 ui_metext / ui_restext 同一个值 (原来是 280)。
+     *   ⚠️ 改模板里的 max_width 时这里要跟着改, 否则屏幕上的气泡和 SquareLine 预览宽度不一致。 */
+    lv_obj_set_style_max_width(label, 240, 0);
     lv_obj_set_style_text_font(label, &ui_font_ch14, 0);
     /* 我的: 黑字配绿底; 对方: 白字配灰底 (和 ui_restext 一致) */
     lv_obj_set_style_text_color(label, lv_color_hex(is_me ? 0x000000 : 0xFFFFFF), 0);
@@ -292,7 +308,7 @@ static lv_obj_t *push(const char *text, bool is_me, const char *why, int *out_sl
 
     /* 新气泡的坐标要等布局算完才有 → 先更新布局再滚。
      * (lv_obj_update_layout 重入时 early return, 见 lv_obj_pos.c:383 —— 不会死锁) */
-    lv_obj_update_layout(ui_contextpanel);
+    lv_obj_update_layout(ui_contextPanel);
     lv_obj_scroll_to_view(roll, LV_ANIM_ON);
 
     if (out_slot != NULL) {
@@ -302,7 +318,11 @@ static lv_obj_t *push(const char *text, bool is_me, const char *why, int *out_sl
     return label;
 }
 
-/* 把环形缓冲里的历史按【从老到新】重建成气泡 (聊天屏被销毁重建后调一次)。
+/* 把环形缓冲里的历史按【从老到新】重建成气泡。
+ *
+ * ⚠️ 当前导出下它**几乎不会被用到**: 屏幕不销毁 → 气泡一直在 → 只在开机第一次
+ *    由 sync_screen 调一次, 而那时缓冲是空的, 函数体直接 return。
+ *    留着是因为它便宜, 而且万一 UI 又改回"离开即销毁"就立刻有用。
  *
  * ★ 用 add_bubble + 手动登记, **不能调 push()** —— push 会再往缓冲里写一遍,
  *   重放就变成滚雪球了。
@@ -337,25 +357,39 @@ static void ring_replay(void)
     }
 
     if (made > 0) {
-        lv_obj_update_layout(ui_contextpanel);
+        lv_obj_update_layout(ui_contextPanel);
         lv_obj_scroll_to_view(s_bubbles[s_bubble_cnt - 1], LV_ANIM_OFF);   /* 一次滚到底 */
         ESP_LOGI(TAG, "聊天屏重建, 重放 %d 条历史", made);
     }
 }
 
-/* 上屏前同步屏幕状态。返回 false = 现在不能上屏。
+/* 上屏前同步屏幕状态。返回 false = 拿不到可用的父对象, 现在不能上屏。
  *
- * ★★ 为什么需要: SquareLine 的聊天屏**离开即销毁** (ui_chat.c:40 的 SCREEN_UNLOADED),
- *   所以 ui_contextpanel 会换新对象, 我们记在 s_bubbles[]/s_live_label 里的指针
- *   全部变悬空 → 下一次 lv_obj_del 就是 use-after-free。
- *   每次换屏都做三件事: ① 不在聊天屏(NULL)就什么都不做
- *   ⚠️ 绝不能拿 NULL 去 lv_obj_create —— 那会创建【一个新的屏幕】而不是子对象。
- *   ② contextpanel 换对象了 → 清空记录 + 删掉 SquareLine 预置的占位气泡
- *   ③ 兜底: 记录里的指针失效了 → 也清空。详见 HANDOFF §6-E。 */
+ * ★★ 这里的分支是"屏幕被销毁重建"时代的产物, 现在的导出【已经不是那个行为了】——
+ *   2026-xx 重新导出后有两处变化 (都要记住, 否则会误判):
+ *
+ *   ① `ui_init()` 就把聊天屏建好了 (ui.c:549 `ui_chat_screen_init()`),
+ *      不再是从 home 右转时才懒加载 → **ui_contextPanel 从开机起就非 NULL**
+ *   ② 所有屏幕都没有 `scr_unloaded_delete_cb` 绑定了 (LVGL 9 导出里 SquareLine 没给),
+ *      → **离开聊天屏【不再销毁】→ ui_contextPanel 指针永远不变**
+ *
+ *   ⇒ 原设计靠"指针为 NULL"识别"不在聊天屏"、靠"指针变了"识别"屏幕重建", 两个判据全失效:
+ *      · `== NULL` 这条分支实际上【永远不会进】(留着只是为了以后 UI 又改回去时兜底)
+ *      · `s_ctx_hooked != ui_contextPanel` 只在【开机第一次】成立一次, 之后不再触发
+ *
+ *   ⇒ 由此得到一个副产品 (是好事): 面板一直在 → 气泡也一直在 → 换屏回来消息不丢,
+ *      所以"重放历史"基本用不上了 (ring_replay 在开机那次跑, 缓冲是空的, 无操作)。
+ *      环形缓冲现在只是【万一以后屏幕又开始销毁】的保险。
+ *
+ *   ⚠️ 也正因为面板一直存在, 上屏函数**不再区分在不在聊天屏** ——
+ *      在别的屏时收到消息也会正常建气泡 (看不见, 但回到聊天屏就在)。
+ *      这是有意的: 用户不在聊天屏时说的话/收到的回复不该丢。
+ *
+ *   ⚠️ 绝不能拿 NULL 去 lv_obj_create —— 那会创建【一个新的屏幕】而不是子对象。 */
 bool sync_screen(void)
 {
-    if (ui_contextpanel == NULL) {
-        /* 还没进过聊天屏, 或已经离开了 → 忘掉一切, 绝不能拿去当父对象
+    if (ui_contextPanel == NULL) {
+        /* 兜底: 面板真的不存在 (只有旧式"离开即销毁"的导出才会走到)。
          * ★ 只清【气泡指针】, 环形缓冲保留 —— 它就是要跨屏幕重建活下来的。 */
         s_bubble_cnt    = 0;
         s_live_label    = NULL;
@@ -368,12 +402,12 @@ bool sync_screen(void)
         return false;
     }
 
-    if (s_ctx_hooked != ui_contextpanel) {
-        /* 屏幕换了 (第一次进, 或离开过又进来) → 旧指针全部作废 */
+    if (s_ctx_hooked != ui_contextPanel) {
+        /* 开机第一次 (或将来屏幕真被重建了) → 旧指针全部作废 */
         if (s_ctx_hooked != NULL) {
-            ESP_LOGD(TAG, "聊天屏已重建, 清空气泡记录");
+            ESP_LOGW(TAG, "聊天屏被重建, 清空气泡记录");
         }
-        s_ctx_hooked    = ui_contextpanel;
+        s_ctx_hooked    = ui_contextPanel;
         s_bubble_cnt    = 0;
         s_live_label    = NULL;
         s_live_res      = NULL;
@@ -389,13 +423,13 @@ bool sync_screen(void)
             lv_obj_del(ui_merollpanel);
         }
         ui_merollpanel = NULL;
-        if (ui_resrollpane != NULL && lv_obj_is_valid(ui_resrollpane)) {
-            lv_obj_del(ui_resrollpane);
+        if (ui_resrollpanel != NULL && lv_obj_is_valid(ui_resrollpanel)) {
+            lv_obj_del(ui_resrollpanel);
         }
-        ui_resrollpane = NULL;
+        ui_resrollpanel = NULL;
 
-        /* ★★ 把说过的话重新摆回来 —— 这个分支【只在换屏时进一次】,
-         *    所以重放不会每轮重复执行。缓冲空时它直接返回。 */
+        /* ★★ 把说过的话重新摆回来 —— 这个分支只在指针变了时进一次, 不会每轮重放。
+         *    开机那次缓冲是空的 → 直接返回, 无副作用。 */
         ring_replay();
     }
 
@@ -444,9 +478,8 @@ void show_asr(const char *text, bool is_final)
         return;
     }
     if (!sync_screen()) {
-        /* 不在聊天屏: 本轮结果只留在控制台。
-         * ⚠️ 已知限制: 不会"等你回聊天屏再补上"。若成为困扰, 可加 PSRAM 环形缓冲重放。 */
-        ESP_LOGW(TAG, "[上屏] 当前不在聊天屏, 丢弃显示: %s", text);
+        /* 拿不到 ui_contextPanel (理论上只有 ui_init 之前才可能) → 这条上屏不了。 */
+        ESP_LOGW(TAG, "[上屏] 聊天面板不存在, 丢弃显示: %s", text);
         return;
     }
 
@@ -468,7 +501,7 @@ void show_asr(const char *text, bool is_final)
     if (s_live_label != NULL) {
         label_set(s_live_label, text);
         ring_update(s_live_slot_me, text);      /* ★ 历史里那条也要跟着走, 否则重放出来是残句 */
-        lv_obj_update_layout(ui_contextpanel);
+        lv_obj_update_layout(ui_contextPanel);
         /* ★ 用 ANIM_OFF: 流式期每 ~137ms 一条, 开动画会一直重启滚动看着抖 */
         lv_obj_scroll_to_view(lv_obj_get_parent(lv_obj_get_parent(s_live_label)), LV_ANIM_OFF);
     } else if (s_asr_active) {
@@ -491,7 +524,7 @@ void show_asr(const char *text, bool is_final)
 void begin_asr(void)
 {
     if (!sync_screen()) {
-        ESP_LOGW(TAG, "[上屏] 会话开始, 但当前不在聊天屏");
+        ESP_LOGW(TAG, "[上屏] 会话开始, 但聊天面板不存在 —— 不出气泡");
         return;
     }
 
@@ -511,14 +544,14 @@ void show_llm(const char *text, bool is_final)
         return;
     }
     if (!sync_screen()) {
-        ESP_LOGW(TAG, "[上屏] 当前不在聊天屏, LLM 回复不显示: %s", text);
+        ESP_LOGW(TAG, "[上屏] 聊天面板不存在, LLM 回复不显示: %s", text);
         return;
     }
 
     if (s_live_res != NULL) {
         label_set(s_live_res, text);           /* 复用同一条, 只改文字 */
         ring_update(s_live_slot_res, text);    /* ★ 历史里那条也要跟着走 */
-        lv_obj_update_layout(ui_contextpanel);
+        lv_obj_update_layout(ui_contextPanel);
         lv_obj_scroll_to_view(lv_obj_get_parent(lv_obj_get_parent(s_live_res)), LV_ANIM_OFF);
     } else {
         s_live_res = push(text, false, "LLM 回复", &s_live_slot_res);

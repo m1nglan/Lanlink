@@ -167,7 +167,7 @@ ws_keeper_task (CPU0,5) → WS::is_connected / is_stale / reconnect
 |---|---|
 | **LVGL 非线程安全** | 非 LVGL 任务访问 UI 必须 `lvgl_port_lock()`；**但 LVGL 上下文内（回调/lv_timer）绝不能再加锁**（锁非递归，会自死锁）|
 | **`drain_queues` 里状态先于内容** | 先处理 `resp_q`（状态）再处理 `stream_q`（内容）。否则 `STARTED` 和第一条 `asr` 同轮到达时，文字先被处理而气泡还没建 → 被当成"已收尾"丢掉 |
-| **屏幕离开即销毁** | `ui_chat` 有 `LV_EVENT_SCREEN_UNLOADED` → 换屏时气泡对象全没。所以 `chat_view` 每次上屏前都要 `sync_screen()`，且**历史存的是纯文本**（环形缓冲），回来时重放 |
+| **聊天屏：开机就建，且不销毁** | 当前 SquareLine 导出在 `ui_init()` 里就调 `ui_chat_screen_init()`（`ui.c`），且所有屏幕都**没有** `scr_unloaded_delete_cb` → `ui_contextPanel` 从开机起存在、指针永不改变。<br>⇒ **气泡一直活着**，换屏回来消息还在，不需要重放；`chat_view` 的环形缓冲退化为保险（详见 `chat_view.cpp` 里 `ring_replay` 的注释）。<br>⚠️ 也正因为面板一直在，`show_asr` / `show_llm` **不区分在不在聊天屏** —— 在别的屏时收到消息也照常建气泡（看不见，回到聊天屏就在）。 |
 | **`pdMS_TO_TICKS(1..9) == 0`** | `CONFIG_FREERTOS_HZ=100` → 1 tick = 10ms。需要短超时要**夹到 ≥1 tick** |
 | **`esp_websocket_client_send_*` 的 timeout 是 RTOS ticks** | 不是毫秒。传错会让一帧音频阻塞 10 秒，而 I2S DMA 只有 128ms |
 | **新增源文件后必须 `touch main/CMakeLists.txt`** | `SRC_DIRS` 是 `file(GLOB)`，只在 CMake 配置阶段扫描；不 touch 会报 `undefined reference` |
