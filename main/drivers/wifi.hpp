@@ -5,8 +5,8 @@
 #include "esp_err.h"
 
 /* ------------------ WiFi 参数(按实际修改) ------------------ */
-#define WIFI_SSID           "XXXXX-H"      /*!< 要连接的 WiFi SSID */
-#define WIFI_PASSWORD       "dhj12345"    /*!< WiFi 密码 */
+#define WIFI_SSID           "CMCC-360"      /*!< 要连接的 WiFi SSID */
+#define WIFI_PASSWORD       "meiyoumima"    /*!< WiFi 密码 */
 #define WIFI_MAX_RETRY      (10)            /*!< 断开后最大重连次数 */
 
 /*!

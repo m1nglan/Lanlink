@@ -112,7 +112,7 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
     const size_t samples16 = byte_size / 2;                 /* int16 采样点个数 */
     const size_t raw_bytes = samples16 * sizeof(uint32_t);  /* 底层 32bit 槽位数据量 */
 
-    /* static 缓冲: 不在栈上,避免调用方(main 任务)栈溢出 */
+    /* static 缓冲: 不在栈上, 避免调用方栈溢出 (一个帧 2560 字节) */
     static uint32_t raw[I2S_MIC_FRAME_BYTES / 2];
 
     size_t bytes_read = 0;
@@ -133,3 +133,7 @@ esp_err_t I2sMic::read_frame(int16_t *dst, size_t byte_size, uint32_t timeout_ms
     }
     return ESP_OK;
 }
+
+/* （原 I2sMic::frame_level() 已删除 —— 它只为"按音量猜服务器死没死"那套服务,
+ *   而那套从未接线。现在本轮何时结束由网关的 {"type":"abroad"} 直接告知,
+ *   用不着靠音量猜了。见 UiBridge::on_abroad。） */

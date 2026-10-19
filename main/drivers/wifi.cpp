@@ -1,6 +1,8 @@
 #include "drivers/wifi.hpp"
 
 #include <string.h>
+#include <stdlib.h>          /* setenv */
+#include <time.h>            /* tzset */
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -8,6 +10,7 @@
 #include "esp_wifi_default.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"  /* esp_netif_sntp_init: IDF 自带的一站式 SNTP */
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
@@ -22,6 +25,43 @@ static const char *TAG = "wifi";
 
 /* 事件组句柄(事件回调与 init 间共享,官方例程同款机制) */
 static EventGroupHandle_t s_wifi_event_group;
+
+/* NTP 服务器 (国内可达的阿里云 NTP) 与时区 */
+#define NTP_SERVER  "ntp.aliyun.com"
+#define NTP_TZ      "CST-8"        /* 北京时间 (UTC+8, 无夏令时) */
+
+/*! 启动 SNTP —— 由 IP_EVENT_STA_GOT_IP 触发, **有网才起**。
+ *
+ *  ★ 为什么不在 app_main 里起: SNTP 要发 UDP 请求, 没拿到 IP 之前发不出去,
+ *    早起了只会白等一轮超时。
+ *  ★ 为什么用 esp_netif_sntp 而不是老的 esp_sntp_*:
+ *    前者是 IDF 5.x+ 的一站式封装 (建 netif 连接 + 服务器列表 + 同步等待),
+ *    一个 esp_netif_sntp_init 就够了, 不用自己搭 socket 回调。
+ *  ★ 时区必须【在同步之前】设好 —— 否则 synced 之后拿到的是 UTC,
+ *    要等到下一次 localtime_r 才按 TZ 换算。
+ *  ★ 只在【第一次】拿到 IP 时起 (断线重连会再次进 GOT_IP, 重复 init 会报错)。 */
+static void sntp_start_once(void)
+{
+    static bool started = false;
+    if (started) {
+        return;
+    }
+    started = true;
+
+    setenv("TZ", NTP_TZ, 1);
+    tzset();
+
+    /* ESP_NETIF_SNTP_DEFAULT_CONFIG 是 C 的指定初始化器, 但字段顺序与声明一致,
+     * C++20 允许 (本项目用 gnu++26) → 可以直接用。 */
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER);
+    esp_err_t err = esp_netif_sntp_init(&config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SNTP 启动失败: %s", esp_err_to_name(err));
+        started = false;              /* 允许下次 GOT_IP 再试 */
+        return;
+    }
+    ESP_LOGI(TAG, "SNTP 已启动 (%s, TZ=%s), 后台自动同步", NTP_SERVER, NTP_TZ);
+}
 
 void WiFi::event_handler(void *arg, const char *event_base,
                          int32_t event_id, void *event_data)
@@ -51,6 +91,8 @@ void WiFi::event_handler(void *arg, const char *event_base,
         if (s_wifi_event_group != NULL) {
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         }
+        /* ★ 拿到 IP → 有网了, 起 SNTP 对时 (只起一次) */
+        sntp_start_once();
     }
 }
 
