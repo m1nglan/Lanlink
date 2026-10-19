@@ -1,0 +1,145 @@
+# LanLink 统一服务网关 接口文档（V1.5）
+
+> 服务器: `<server-ip>` · 端口: 18888（部署时填你自己的） · 2026-08-22 更新
+> 一条长连接 + 应用层切换: text(语音听写) / llm(大模型) / openclaw(明岚) / usage(服务器监控) / weather(天气) / echo(调试)
+
+---
+
+## 1. 统一入口（固定一个URL）
+
+```
+ws://<server-ip>:18888/?token=***
+```
+
+切换服务：
+```json
+{"type":"svc","service":"text"}       → {"type":"svc_ok","service":"text"}
+{"type":"svc","service":"llm"}        → {"type":"svc_ok","service":"llm"}
+{"type":"svc","service":"openclaw"}   → {"type":"svc_ok","service":"openclaw"}
+{"type":"svc","service":"usage"}      → {"type":"svc_ok","service":"usage"}
+{"type":"svc","service":"weather"}    → {"type":"svc_ok","service":"weather"}
+{"type":"svc","service":"echo"}       → {"type":"svc_ok","service":"echo"}
+```
+
+- 切换自动清理上一服务状态；默认服务 text
+- 心跳: `{"type":"ping"}` → `{"type":"pong"}`（任何模式有效）
+
+---
+
+## 5. type=usage 服务器监控
+
+切换后服务器**每 2 秒自动推送**一条（无需请求）：
+```json
+{"type":"usage","usage":true,"t":1787411460,
+ "cpu":12,
+ "ram_used":"1.7G/2G","ram_pct":92,
+ "disk_used":"33.3G/39.0G","disk_pct":85,
+ "rx":4,"tx":2}
+```
+
+- cpu: 占用百分比(整数) · ram_pct/disk_pct: 百分比(整数)
+- ram_used/disk_used: 使用/总量 字符串（G 单位）
+- rx/tx: 网络速度，单位 KB/s（整数）
+- `usage` 字段为 true 即监控数据
+
+---
+
+## 6. type=weather 天气
+
+切换后自动推送一次，之后可随时 `{"type":"get"}` 主动刷新（网关 60s 缓存，省 QPS）：
+```json
+{"type":"weather","weather":true,"text":"多云","temp":"18",
+ "temp_max":"29","temp_min":"17","kind":3}
+```
+
+- text: 当前天气（中文，如 多云/晴/小雨）
+- temp: 当前温度(℃) · temp_max: 当日最高 · temp_min: 当日最低
+- kind: 天气类型 1~8（已按图标归类）:
+  1=白天晴 2=夜晚晴 3=多云 4=阴天 5=雨 6=雪 7=雷雨 8=风（999未知兜底为3多云）
+
+---
+
+## 2. type=text 语音听写
+
+```
+板子 → {"type":"start"}             开始（触发器）
+板子 → [PCM二进制帧] 任意段数       音频（16kHz/16bit/mono, 1280B/帧≈40ms）
+网关 → {"type":"partial","text":"新字"}   增量（只发新增的字, 板子 buffer += text）
+板子 → {"type":"end"}               结束（触发器）
+网关 → {"type":"final","text":"完整"}     最终（整体替换, 修正所有错字）
+```
+
+- start 前发音频会被丢弃；单轮最长55秒
+- **增量规则**：partial 只含新增后缀；讯飞修正时服务器不发中间消息，**final 统一修正**
+- **final = 本轮完成**
+
+---
+
+## 3. type=llm / type=openclaw 对话
+
+```
+板子 → {"type":"chat","content":"记作业：数学第3页"}
+网关 → {"type":"partial","text":"新字"}   流式增量（多条, 追加显示）
+网关 → {"type":"reply","content":"完整"}   完整回复（★ 最后一条 = 本轮完成）
+板子 → {"type":"clear"}              清空上下文（llm 生效）
+```
+
+- **llm**: DeepSeek（deepseek-chat），网关维护最近20条消息+system提示词
+- **openclaw**: 转发明岚（openclaw/default），SSE 流式，**接入 main 会话（主子微信可见）**
+- **工具调用**：明岚调工具期间无输出（partial 空窗，可能几秒~几十秒），工具完继续流式——**板子无需感知，等 reply 即可**
+- **reply 永远是最后一条**，收到即本轮完成，用完整内容覆盖刷新显示
+
+---
+
+## 4. type=echo 调试
+
+接受什么回什么：文本帧回 `{"type":"echo","data":"..."}`，二进制帧原样回显。
+
+---
+
+## 7. 错误
+
+```json
+{"type":"error","code":1,"message":"讯飞错误"}
+{"type":"error","code":2,"message":"llm/openclaw 调用失败"}
+{"type":"error","code":3,"message":"音频超过55s"}
+{"type":"error","code":4,"message":"未知服务"}
+```
+
+---
+
+## 8. 连接保活
+
+- 服务器 120s 协议层 ping 检测死连接（正常板子自动回 pong，不会误踢）
+- 板子建议 20~40s 发一次 `{"type":"ping"}` 应用层保活
+- 板子断电/断网：服务器 60s 内判定死亡并清理
+
+---
+
+## 9. 部署
+
+| 项 | 值 |
+|---|---|
+| 代码 | `/home/m1nglan/lanlink-gateway/` |
+| 密钥 | `config.json`（chmod 600, 勿提交 git） |
+| 启动 | `bash start.sh` |
+| 日志 | `gateway.log` |
+| 板端示例 | `board_example/`（gateway_client + handle_text） |
+
+## 10. 消息一览
+
+| 方向 | type | 含义 | 处理 |
+|---|---|---|---|
+| 上行 | svc | 切换服务 | - |
+| 上行 | start/end | 语音轮次触发 | - |
+| 上行 | chat/clear | 对话/清空 | - |
+| 上行 | get | 主动刷新天气 | - |
+| 上行 | ping | 心跳 | - |
+| 下行 | svc_ok | 切换确认 | - |
+| 下行 | partial | 增量字(text)/流式字(对话) | 追加显示 |
+| 下行 | final | 语音最终文本 | 整体替换 = 完成 |
+| 下行 | reply | 对话完整回复 | 整体替换 = 完成 |
+| 下行 | usage | 服务器监控(2s一跳) | 定时更新 |
+| 下行 | weather | 天气数据 | 刷新显示 |
+| 下行 | pong | 心跳应答 | - |
+| 下行 | error | 错误 | 处理提示 |

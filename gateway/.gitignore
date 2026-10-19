@@ -1,0 +1,10 @@
+config.json
+gateway.log
+*.log
+__pycache__/
+*.pyc
+*.pcm
+*.wav
+*.bak-*
+*.pre-*
+.vscode/

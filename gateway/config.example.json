@@ -1,0 +1,18 @@
+{
+  "openclaw": {
+    "base_url": "http://127.0.0.1:27878/v1",
+    "token": "<openclaw-gateway-token>",
+    "model": "openclaw/default",
+    "session_key": "agent:main:main"
+  },
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "<deepseek-api-key>",
+    "model": "deepseek-flash"
+  },
+  "qweather": {
+    "host": "<your-qweather-api-host>",
+    "key": "<your-qweather-key>",
+    "location": "<city-id>"
+  }
+}
