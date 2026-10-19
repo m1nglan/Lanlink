@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Size: 18 px
  * Bpp: 4
- * Opts: --bpp 4 --size 18 --font C:/Users/Tansuan/Desktop/Lanlink_lvgl/assets/SourceHanSansSC-Regular-2.otf -o C:/Users/Tansuan/Desktop/Lanlink_lvgl/assets\ui_font_date18.c --format lvgl -r 0x20-0x7F --symbols 1234567890年月日星期一二三四五六日 --no-compress --no-prefilter
+ * Opts: --bpp 4 --size 18 --font D:/Desktop/ESP-IDF/Lanlink_lvgl/assets/SourceHanSansSC-Regular-2.otf -o D:/Desktop/ESP-IDF/Lanlink_lvgl/assets\ui_font_date18.c --format lvgl -r 0x20-0x7F --symbols 1234567890年月日星期一二三四五六日- --no-compress --no-prefilter
  ******************************************************************************/
 
 #include "../ui.h"

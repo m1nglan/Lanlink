@@ -640,13 +640,13 @@ ASR final 到达 (WS 回调, 持 client->lock)
   3. `ui_bridge: [连接] ... status=0`（`RESP_WS_STATUS` + `CONNECTED`）
   4. `ws_keeper: 网关已连接 (服务由 voice_task 在会话开头切换)`
   5. **阶段 1 无回归**：转编码器仍切屏、按键仍一次一沿、**无 Task WDT**
-  6. 按**录音键（GPIO2）** → `[会话] status=3`(STARTED) → **聊天屏立刻冒出一个小绿气泡**
+  6. 按**录音键（GPIO42）** → `[会话] status=3`(STARTED) → **聊天屏立刻冒出一个小绿气泡**
      → `voice: 服务器已确认切到 text` → `已发送 start` → `采音开始 (每帧 1280 字节 / 40ms)`
      → 说话 → `[流式] kind=0 final=0 text="..."` **逐步变长（全量替换，不重复叠加）**
      → 松开 → `[流式] ... final=1` 整句完整 → `[上屏] 定格: ... (PSRAM 空闲 XXXX KB)`
      → `[会话] status=4`(ENDED)
   7. **按下后立刻松开**（不说话）→ 小绿气泡出现后**自己消失**（空气泡被删）
-  8. 按**服务键（GPIO42）** → 只有一条日志，**不投任何队列**
+  8. 按**服务键（GPIO2）** → 只有一条日志，**不投任何队列**
   9. 拔网线 → `status=1`(DISCONNECTED) → `status=2`(RECONNECTING) → 插回 → `status=0`(CONNECTED)
      ✅ **已验证**：拔网线录音 → ABORTED + `ws_keeper` 重连 → 再按可开新会话
   10. **快速点按**（按下即松）→ `voice: 等 svc_ok 期间用户已松手 (快速点按), 本轮取消`，不崩、不留残留会话

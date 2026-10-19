@@ -72,7 +72,7 @@ void ui_Balance_screen_init(void)
     lv_obj_set_x(ui_balancenum, -2);
     lv_obj_set_y(ui_balancenum, 30);
     lv_obj_set_align(ui_balancenum, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_balancenum, "12.33");
+    lv_label_set_text(ui_balancenum, "--.--");
     lv_obj_set_style_text_color(ui_balancenum, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_balancenum, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_balancenum, &lv_font_montserrat_38, LV_PART_MAIN | LV_STATE_DEFAULT);

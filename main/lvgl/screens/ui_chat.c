@@ -41,7 +41,7 @@ void ui_chat_screen_init(void)
     lv_obj_set_style_bg_opa(ui_chat, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_contextPanel = lv_obj_create(ui_chat);
-    lv_obj_set_width(ui_contextPanel, 320);
+    lv_obj_set_width(ui_contextPanel, 332);
     lv_obj_set_height(ui_contextPanel, 129);
     lv_obj_set_x(ui_contextPanel, 1);
     lv_obj_set_y(ui_contextPanel, 20);
@@ -55,7 +55,7 @@ void ui_chat_screen_init(void)
     lv_obj_set_style_pad_left(ui_contextPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_right(ui_contextPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_top(ui_contextPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_bottom(ui_contextPanel, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_bottom(ui_contextPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_row(ui_contextPanel, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_column(ui_contextPanel, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
 
@@ -65,7 +65,6 @@ void ui_chat_screen_init(void)
     lv_obj_set_x(ui_merollpanel, -260);
     lv_obj_set_y(ui_merollpanel, -33);
     lv_obj_set_align(ui_merollpanel, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_merollpanel, LV_OBJ_FLAG_HIDDEN);     /// Flags
     lv_obj_remove_flag(ui_merollpanel, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_obj_set_style_radius(ui_merollpanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(ui_merollpanel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -96,7 +95,7 @@ void ui_chat_screen_init(void)
     ui_metext = lv_label_create(ui_mepanel);
     lv_obj_set_width(ui_metext, LV_SIZE_CONTENT);   /// 300
     lv_obj_set_height(ui_metext, LV_SIZE_CONTENT);    /// 33
-    lv_label_set_text(ui_metext, "测试");
+    lv_label_set_text(ui_metext, "测试测试测试测试测试测试测试测试测试测试测试测试测试测试");
     lv_obj_set_style_text_color(ui_metext, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_metext, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_metext, &ui_font_ch14, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -109,7 +108,6 @@ void ui_chat_screen_init(void)
     lv_obj_set_x(ui_resrollpanel, -265);
     lv_obj_set_y(ui_resrollpanel, -33);
     lv_obj_set_align(ui_resrollpanel, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_resrollpanel, LV_OBJ_FLAG_HIDDEN);     /// Flags
     lv_obj_remove_flag(ui_resrollpanel, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_obj_set_style_radius(ui_resrollpanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(ui_resrollpanel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -191,7 +189,7 @@ void ui_chat_screen_init(void)
 
     ui_choPanel = lv_obj_create(ui_chat);
     lv_obj_set_width(ui_choPanel, 320);
-    lv_obj_set_height(ui_choPanel, 0);
+    lv_obj_set_height(ui_choPanel, 100);
     lv_obj_set_x(ui_choPanel, 0);
     lv_obj_set_y(ui_choPanel, -6);
     lv_obj_set_align(ui_choPanel, LV_ALIGN_TOP_MID);
@@ -226,6 +224,8 @@ void ui_chat_screen_init(void)
     lv_obj_set_style_pad_right(ui_choinPanel2, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_top(ui_choinPanel2, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_bottom(ui_choinPanel2, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_row(ui_choinPanel2, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_column(ui_choinPanel2, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_choclaw2 = lv_image_create(ui_choinPanel2);
     lv_image_set_src(ui_choclaw2, &ui_img_penggang_48_png);
@@ -234,14 +234,13 @@ void ui_chat_screen_init(void)
     lv_obj_add_flag(ui_choclaw2, LV_OBJ_FLAG_ADV_HITTEST);     /// Flags
     lv_obj_remove_flag(ui_choclaw2, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_image_set_scale(ui_choclaw2, 200);
-    lv_image_set_inner_align(ui_choclaw2, LV_IMAGE_ALIGN_TILE);
-    lv_obj_set_style_radius(ui_choclaw2, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(ui_choclaw2, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(ui_choclaw2, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_choclaw2, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_color(ui_choclaw2, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_outline_color(ui_choclaw2, lv_color_hex(0x70C0F1), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_outline_opa(ui_choclaw2, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_width(ui_choclaw2, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_pad(ui_choclaw2, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_outline_width(ui_choclaw2, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_outline_pad(ui_choclaw2, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_chodeep2 = lv_image_create(ui_choinPanel2);
     lv_image_set_src(ui_chodeep2, &ui_img_2034640467);
@@ -251,14 +250,11 @@ void ui_chat_screen_init(void)
     lv_obj_add_flag(ui_chodeep2, LV_OBJ_FLAG_ADV_HITTEST);     /// Flags
     lv_obj_remove_flag(ui_chodeep2, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_image_set_scale(ui_chodeep2, 200);
-    lv_image_set_inner_align(ui_chodeep2, LV_IMAGE_ALIGN_TILE);
-    lv_obj_set_style_radius(ui_chodeep2, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(ui_chodeep2, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(ui_chodeep2, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_chodeep2, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_outline_color(ui_chodeep2, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_opa(ui_chodeep2, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_width(ui_chodeep2, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_pad(ui_chodeep2, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_outline_opa(ui_chodeep2, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lv_obj_add_event_cb(ui_chat, ui_event_chat, LV_EVENT_ALL, NULL);
 

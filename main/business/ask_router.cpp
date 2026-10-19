@@ -8,11 +8,11 @@
 
 static const char *TAG = "ask_router";
 
-/*! 语音识别结果转发给哪个服务。
+/*! 语音识别结果转发给哪个服务 —— 运行时可改 (由 chat 屏的"选择模型"面板决定)。
  *  "openclaw" = 明岚   |   "llm" = DeepSeek
- *  ★ 两者协议完全相同 (chat / partial / reply), 换的只是服务名 ——
- *    想切回来只改这一行。 */
-#define ASK_SERVICE  "openclaw"
+ *  ★ 两者协议完全相同 (chat / partial / reply), 换的只是服务名。
+ *  ★ 必须放在 static 区 (下面), 这里只留容量常量。 */
+#define ASK_SERVICE_MAX  (16)
 
 /*! 提问前缀 —— 让对方一眼看出这话是从 Lanlink 设备来的。
  *  实际发出的是 {"type":"chat","content":"[Lanlink] <识别文字>"}。
@@ -36,6 +36,12 @@ static const char *TAG = "ask_router";
  * ★ 取 2.5 秒: final 实测在 end 之后约 1470ms 到, 给足余量又不至于让用户干等。
  *   与 chat_view 的 CHAT_END_GRACE_MS 同值 —— 描述的是同一件事。 */
 #define ASK_FINAL_WAIT_MS  (2500)
+
+/*! 发完 chat 之后"算忙"的冷却时长 (ms)。
+ *  ★ 为什么要冷却: 别的模块 (天气轮询) 会来问"现在能不能切 svc"。切走就把
+ *    openclaw 的回复掐了 —— 明岚实测 3~26 秒才吐字, 取 30 秒盖住。
+ *  ⚠️ 这是"宁可多等"的保守估计, 不是精确的"回复还没到"。详见 is_busy() 的说明。 */
+#define ASK_COOLDOWN_MS    (30000)
 
 namespace ask_router {
 
@@ -63,6 +69,14 @@ static bool     s_ask_armed = false;
 /*! 兜底触发的时刻 (ms) */
 static uint32_t s_ask_deadline = 0;
 
+/*! "刚发完 chat" 的冷却截止时刻 (ms)。见 is_busy() / ASK_COOLDOWN_MS。
+ *  ★ 用 int32_t 差值比较, 不用绝对比较 —— 避免 now_ms() 每 ~49 天回绕时判错。 */
+static uint32_t s_cooldown_until = 0;
+
+/*! ★ 当前转发目标 —— 由 set_service() 改, 出厂默认 DeepSeek。
+ *  默认值必须和"开机时不发任何 svc"相容: send_now() 会在发 chat 前自己切服务。 */
+static char s_service[ASK_SERVICE_MAX] = "llm";
+
 /* ------------------ 内部工具 ------------------ */
 
 static inline uint32_t now_ms(void)
@@ -70,7 +84,7 @@ static inline uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-/* 把一句话发给 ASK_SERVICE: 切服务 + 暂存这句话(带 ASK_PREFIX 前缀),
+/* 把一句话发给 s_service: 切服务 + 暂存这句话(带 ASK_PREFIX 前缀),
  * 等 svc_ok 回来再发 chat。
  * ★ 不切回 text —— 下一轮录音时 voice_session 开头自己会切回。
  * ★ 用 snprintf 而不是 strlcpy: 要拼前缀, 且 content 过长时它安全截断。 */
@@ -85,11 +99,11 @@ static bool send_now(const char *content)
 
     esp_err_t ret = ESP_ERR_INVALID_STATE;
     if (s_hooks.switch_service != nullptr) {
-        ret = s_hooks.switch_service(ASK_SERVICE);   /* {"type":"svc","service":...} */
+        ret = s_hooks.switch_service(s_service);   /* {"type":"svc","service":...} */
     }
 
     ESP_LOGI(TAG, "转发识别结果到 %s (%.24s%s): %s, 等 svc_ok 后发 chat",
-             ASK_SERVICE, content, (content[24] != '\0') ? "..." : "", esp_err_to_name(ret));
+             s_service, content, (content[24] != '\0') ? "..." : "", esp_err_to_name(ret));
     return ret == ESP_OK;
 }
 
@@ -180,7 +194,7 @@ void tick(void)
 
 bool handle_svc_ok(const char *service)
 {
-    if (service == nullptr || strcmp(service, ASK_SERVICE) != 0) {
+    if (service == nullptr || strcmp(service, s_service) != 0) {
         return false;                   /* 不是本模块等的那个服务 */
     }
 
@@ -191,7 +205,7 @@ bool handle_svc_ok(const char *service)
             ret = s_hooks.send_chat(s_pending_chat);   /* ★ 现在才发 */
         }
         ESP_LOGI(TAG, "%s 已就绪, 发 chat (%.24s%s): %s",
-                 ASK_SERVICE, s_pending_chat,
+                 s_service, s_pending_chat,
                  (s_pending_chat[24] != '\0') ? "..." : "", esp_err_to_name(ret));
 
         /* ★ 发成功就立刻放一个"(思考中)"的灰泡占位。
@@ -200,8 +214,59 @@ bool handle_svc_ok(const char *service)
         if (ret == ESP_OK && s_hooks.show_waiting != nullptr) {
             s_hooks.show_waiting(ASK_WAIT_TEXT);
         }
+
+        /* ★ 发成功就起冷却: 接下来 30 秒内 is_busy() 返回 true,
+         *   别的模块 (天气轮询) 就不会来抢 svc 状态把回复掐掉。 */
+        if (ret == ESP_OK) {
+            s_cooldown_until = now_ms() + ASK_COOLDOWN_MS;
+        }
     }
     return true;                        /* ★ 已处理, 调用者别再往下走 */
+}
+
+bool set_service(const char *service)
+{
+    if (service == nullptr || service[0] == '\0') {
+        return false;
+    }
+    if (strlen(service) >= ASK_SERVICE_MAX) {
+        ESP_LOGE(TAG, "服务名太长 (上限 %d): %s", ASK_SERVICE_MAX - 1, service);
+        return false;
+    }
+    if (strcmp(service, s_service) == 0) {
+        return true;                       /* 没变, 幂等 */
+    }
+    /* ★ 拒绝在有提问流程中改动: 那时一个 svc_ok 正在路上,
+     *   它带回来的服务名和新的对不上 → 会被当成"别人的"丢掉 ✗ */
+    if (s_pending) {
+        ESP_LOGW(TAG, "有提问正在切服务, 暂不切换转发目标 (等它结束再试)");
+        return false;
+    }
+    strlcpy(s_service, service, sizeof(s_service));
+    ESP_LOGI(TAG, "转发目标 → %s", s_service);
+    return true;
+}
+
+const char *get_service(void)
+{
+    return s_service;
+}
+
+bool is_busy(void)
+{
+    /* ① 有提问在等 svc_ok */
+    if (s_pending) {
+        return true;
+    }
+    /* ② 松手后在等 final 的宽限期里 (还没问出去) */
+    if (s_ask_armed && !s_final_seen && !s_asked) {
+        return true;
+    }
+    /* ③ 刚发完 chat 的冷却期。★ 用 int32_t 差值, 扛 now_ms() 回绕 */
+    if ((int32_t)(s_cooldown_until - now_ms()) > 0) {
+        return true;
+    }
+    return false;
 }
 
 }  // namespace ask_router

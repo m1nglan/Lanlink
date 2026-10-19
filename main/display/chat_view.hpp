@@ -38,4 +38,11 @@ void tick(void);
 void show_asr(const char *text, bool is_final);
 void show_llm(const char *text, bool is_final);
 
+/*! 清空整个聊天面板 (删掉所有气泡 + 清 PSRAM 历史缓冲)。
+ *  ★ 切换模型时用 —— 屏幕上的旧气泡留着只会误导。
+ *  ★ 只清【屏幕】, 不发网关的 {"type":"clear"}: 网关的服务上下文是按服务
+ *    各存一份的, 切到 llm / openclaw 本身就换了一套上下文, 不需要额外清。
+ *  ★ 必须在 LVGL 上下文 (锁已持有) 调用。 */
+void clear_all(void);
+
 }  // namespace chat_view

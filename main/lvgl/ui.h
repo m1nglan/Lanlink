@@ -31,7 +31,6 @@ extern lv_anim_t * bts_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * rain_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * panelopen_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * snow_Animation(lv_obj_t * TargetObject, int delay);
-extern lv_anim_t * startgif_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * lightingshow_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * Lanshow_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * linkshow_Animation(lv_obj_t * TargetObject, int delay);
@@ -41,6 +40,9 @@ extern lv_anim_t * wind_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * lighting_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * choosemode_Animation(lv_obj_t * TargetObject, int delay);
 extern lv_anim_t * openmessage_Animation(lv_obj_t * TargetObject, int delay);
+extern lv_anim_t * chomodelclose_Animation(lv_obj_t * TargetObject, int delay);
+extern lv_anim_t * newmessage_Animation(lv_obj_t * TargetObject, int delay);
+extern lv_anim_t * closemessage_Animation(lv_obj_t * TargetObject, int delay);
 
 // EVENTS
 
@@ -59,31 +61,11 @@ LV_IMG_DECLARE(ui_img_penggang_48_png);    // assets/penggang_48.png
 LV_IMG_DECLARE(ui_img_2034640467);    // assets/logo2-96_48.png
 LV_IMG_DECLARE(ui_img_bg_png);    // assets/bg.png
 LV_IMG_DECLARE(ui_img_1926284110);    // assets/temperature-celsius.png
-LV_IMG_DECLARE(ui_img_frame_00_png);    // assets/frame_00.png
+LV_IMG_DECLARE(ui_img_bloudy_png);    // assets/bloudy.png
 LV_IMG_DECLARE(ui_img_lighting_1_png);    // assets/lighting_1.png
-LV_IMG_DECLARE(ui_img_lighting_2_png);    // assets/lighting_2.png
-LV_IMG_DECLARE(ui_img_lighting_3_png);    // assets/lighting_3.png
-LV_IMG_DECLARE(ui_img_lighting_4_png);    // assets/lighting_4.png
-LV_IMG_DECLARE(ui_img_lighting_5_png);    // assets/lighting_5.png
-LV_IMG_DECLARE(ui_img_lighting_6_png);    // assets/lighting_6.png
 LV_IMG_DECLARE(ui_img_rain_1_png);    // assets/rain_1.png
-LV_IMG_DECLARE(ui_img_rain_2_png);    // assets/rain_2.png
-LV_IMG_DECLARE(ui_img_rain_3_png);    // assets/rain_3.png
-LV_IMG_DECLARE(ui_img_rain_4_png);    // assets/rain_4.png
-LV_IMG_DECLARE(ui_img_rain_5_png);    // assets/rain_5.png
-LV_IMG_DECLARE(ui_img_rain_6_png);    // assets/rain_6.png
-LV_IMG_DECLARE(ui_img_snow_1_png);    // assets/snow_1.png
-LV_IMG_DECLARE(ui_img_snow_2_png);    // assets/snow_2.png
-LV_IMG_DECLARE(ui_img_snow_3_png);    // assets/snow_3.png
 LV_IMG_DECLARE(ui_img_snow_4_png);    // assets/snow_4.png
-LV_IMG_DECLARE(ui_img_snow_5_png);    // assets/snow_5.png
-LV_IMG_DECLARE(ui_img_snow_6_png);    // assets/snow_6.png
-LV_IMG_DECLARE(ui_img_wind_1_png);    // assets/wind_1.png
-LV_IMG_DECLARE(ui_img_wind_2_png);    // assets/wind_2.png
 LV_IMG_DECLARE(ui_img_wind_3_png);    // assets/wind_3.png
-LV_IMG_DECLARE(ui_img_wind_4_png);    // assets/wind_4.png
-LV_IMG_DECLARE(ui_img_wind_5_png);    // assets/wind_5.png
-LV_IMG_DECLARE(ui_img_wind_6_png);    // assets/wind_6.png
 
 // FONTS
 LV_FONT_DECLARE(ui_font_balance22);

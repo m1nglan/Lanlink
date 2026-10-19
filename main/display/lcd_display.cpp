@@ -45,6 +45,29 @@ esp_err_t lcd_panel_init(esp_lcd_panel_handle_t *panel_out, esp_lcd_panel_io_han
     io_config.lcd_param_bits = 8;
     io_config.spi_mode = 0;
     io_config.trans_queue_depth = 10;
+
+    /* ★★ 【必须开】允许用 PSRAM 里的绘图缓冲【直接】做 SPI DMA 源。
+     *
+     * 不开会怎样（实测踩过）:
+     *   LVGL 的绘图缓冲放在 PSRAM (lvgl_port.cpp 的 LVGL_BUF_IN_PSRAM = 1),
+     *   而 esp_lcd_panel_io_spi.c:376 只有在 flags.psram_dma_direct=1 时才给事务置
+     *   SPI_TRANS_DMA_USE_PSRAM。不置位 → spi_master.c:1195 认为"不打算用 PSRAM",
+     *   → spicommon_dma_setup_priv_buffer 判定 need_malloc=true, 于是【每次 flush 都要
+     *     从内部 RAM 里 malloc 一个等长的 bounce buffer】。
+     *   ⚠️ 小脏区时几 KB 能成功, 所以平时看不出来;
+     *      一旦整屏刷新 (320x170x2 = 108,800 字节) 内部 RAM 根本拿不出这么多 →
+     *        E spicommon_dma_setup_priv_buffer: Failed to allocate priv TX buffer
+     *        E lcd_panel.io.spi: spi transmit (queue) color failed
+     *      → flush 完成回调永远不来 → Task WDT。
+     *   (典型触发点: 开屏切主界面、切屏动画这种整屏重绘)
+     *
+     * 开了之后: 缓冲里的数据直接从 PSRAM 走 GDMA, 【不再有临时缓冲】。
+     *   ✅ 省掉每次 flush 的一次 100KB 级 memcpy (更快)
+     *   ✅ 不再吃内部 RAM
+     *   ⚠️ 代价: 官方注释说 PSRAM 直连 DMA 有带宽上限 —— 本条屏 320x170 完全够用。
+     *      LVGL 缓冲在 PSRAM 时【必须】开这个, 否则就是上面那个必崩路径。 */
+    io_config.flags.psram_dma_direct = 1;
+
     ret = esp_lcd_new_panel_io_spi(SPI2_HOST, &io_config, &io);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_lcd_new_panel_io_spi: %s", esp_err_to_name(ret));

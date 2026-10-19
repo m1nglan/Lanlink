@@ -77,7 +77,46 @@ typedef enum {    //< 状态 键
     RESP_WS_STATUS = 0,   /*!< 连接状态 (连上/断开/重连中) → u.sta */
     RESP_ASR_STATUS,      /*!< 会话状态 (开始/结束/中止)   → u.sta */
     RESP_STATUS,          /*!< 通用短提示 (≤21 汉字)     → u.text */
+    RESP_KEY,             /*!< ★ 物理按键原始事件 → u.i32 = (key_id << 1) | pressed */
+    RESP_USAGE,           /*!< ★ 服务器监控 → u.usage */
+    RESP_BALANCE,         /*!< ★ 余额 → u.f32 = total (元, 2 位小数) */
 } resp_kind_t;
+
+/*! 服务器监控快照 (网关 {"type":"usage"}, 切到 usage 服务后每 2 秒自动推送)。
+ *
+ *  ★★ 为什么能直接塞进 resp_msg_t 的 union: 它只有 42 字节, 而 u.text 本来就占 64
+ *     → 加它 **resp_msg_t 不会长大**, resp_q 深 16 也不多花一个字节 ✓
+ *
+ *  报文 (MD/APIserver.md §5):
+ *    {"type":"usage","usage":true,"t":..., "cpu":12,
+ *     "ram_used":"1.7G/2G","ram_pct":92,
+ *     "disk_used":"33.3G/39.0G","disk_pct":85, "rx":4,"tx":2}
+ *  ⚠️ ram_used / disk_used 是【字符串】(带 "G" 和 "/"), 其它都是整数。 */
+typedef struct {
+    int16_t cpu;           /*!< CPU 占用 %    */
+    int16_t ram_pct;       /*!< 内存占用 %    */
+    int16_t disk_pct;      /*!< 磁盘占用 %    */
+    int16_t rx;            /*!< 下行 KB/s     */
+    int16_t tx;            /*!< 上行 KB/s     */
+    char    ram_used[16];  /*!< "1.7G/2G"     */
+    char    disk_used[16]; /*!< "33.3G/39.0G" */
+    char    cpu_str[16];   /*!< ★ "0.3/2 Core" —— 负载/核心数文字, 网关字段名 cpu_str。
+                            *    ★ 用字符串而不是数字: 网关想怎么拼就怎么拼 (负载/核心数/
+                            *      线程数), 板子这边只负责原样显示 ✓
+                            *    16+16=58 字节, 仍不超 u.text 的 64 ✓ */
+} usage_t;                 /*!< 58 字节 */
+
+/*! 物理按键编号。
+ *
+ *  ★★ 这里【只报告"哪个键被按下/松开"】, 绝不判断"按下意味着什么" ——
+ *    语义由 LVGL 层按当前 UI 状态决定 (面板开没开、焦点在哪、在哪个屏)。
+ *    例: IO42 面板关着时是【录音】(按下开始/松开结束), 面板开着时是【取消】。
+ *    两者互斥, 所以不需要长按检测, 也不需要在这里做任何时间判断。
+ *  见 UiBridge::drain_queues 里 case RESP_KEY 那一段。 */
+typedef enum {
+    KEY_A = 0,   /*!< IO2  (原"服务键") —— 打开模型面板 / 确认 */
+    KEY_B = 1,   /*!< IO42 (原"录音键") —— 录音 / 取消面板 */
+} key_id_t;
 
 typedef enum {          //!< 状态值: 投给 resp_q 的"哪一类状态"
     CONNECTED = 0,
@@ -101,6 +140,7 @@ typedef struct {
         int32_t i32;                       /*!< 32bit 数值类 (余额/百分比/计数) */
         float   f32;                       /*!< 单精度浮点类 */
         status_kind_t sta;                 /*!< 状态枚举 —— 目前唯一在用的成员 */
+        usage_t usage;                     /*!< ★ 服务器监控快照 (42 B, 不超 text 的 64 B) */
     } u;
 } resp_msg_t;             /*!< 76 字节 (旧: 512 时代的 524 字节) */
 

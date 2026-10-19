@@ -59,4 +59,36 @@ void tick(void);
  *          false = 不是本模块的, 调用者继续自己的逻辑 (目前是投 VOICE_SVC_ACKED)。 */
 bool handle_svc_ok(const char *service);
 
+/*! 现在"忙不忙" —— 给天气轮询判空闲用（忙就跳过这一轮，别抢 svc 状态）。
+ *
+ *  三个判据, 任一成立就算忙:
+ *    ① 有提问在等 svc_ok     (s_pending)
+ *    ② 在等 final 的宽限期里  (s_ask_armed && 还没问到)
+ *    ③ 刚发完 chat 的冷却期内 (A'' 方案: 发出去后 30 秒内一律算忙)
+ *
+ *  ★★ 为什么 ③ 用【固定 30 秒】而不是"等 reply 到了再解锁":
+ *    openclaw(明岚) 实测 3~26 秒才吐第一个字, 30 秒能盖住。
+ *    要精确就得加"等回复"标志 + 由 on_llm_stream 反通知, 约 20 行, 收益不大。
+ *    ⚠️ 已知代价: 若明岚 5 秒就回完, 剩 25 秒仍算忙 → 那一轮天气推迟 1 分钟。
+ *      对 5 分钟一次的天气完全无所谓。 */
+bool is_busy(void);
+
+/* ================================================================
+ * "把识别结果转发给哪个模型" —— 由"选择模型"面板决定
+ * ================================================================ */
+
+/*! 切换转发目标。
+ *  明岚 = "openclaw" ｜ DeepSeek = "llm"
+ *
+ *  ★ 只改【目标】, 不立刻发 svc —— 真正的服务切换发生在下次 send_now() 里
+ *    (那里先 switch_service + 等 svc_ok, 再发 chat), 所以这里零网络开销,
+ *    也不会去抢 weather_poll / voice_task 正在用的 svc 状态。
+ *  ★ 若当前有提问正处在流程中 (s_pending), 会拒绝改动:
+ *    那时一个 svc_ok 正在路上, 名字对不上就会被当成"别人的"丢掉。
+ *  @return true = 已生效 */
+bool set_service(const char *service);
+
+/*! 当前转发目标 (只读)。 */
+const char *get_service(void);
+
 }  // namespace ask_router

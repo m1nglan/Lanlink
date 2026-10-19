@@ -32,6 +32,15 @@ public:
      *     放栈上或循环里重建 → 回调踩已释放内存。详见 HANDOFF §6 坑#4。 */
     RtAsr& asr(void) { return m_asr; }
 
+    /*! 当前是否有一轮语音会话在进行 (STARTED 到 ENDED/ABORTED 之间)。
+     *
+     *  ★ 用途: 天气轮询判断"现在忙不忙" —— 忙就跳过这一轮, 别去抢 svc 状态。
+     *  ⚠️ 时序坑: 松手 (ENDED) 那一刻它就变 false 了, 但那时 ask_router 还在等 final
+     *     → 所以判"空闲"必须【同时】看 ask_router::is_busy(), 光看这个会误判。
+     *  ★★ 还包含"刚按下、voice_task 正在切 svc text"那段窗口 (m_pending_start) ——
+     *     那个窗口里 m_asr_active 还是 false, 但这时候切走服务会把整轮语音搞废。 */
+    bool is_asr_active(void) const { return m_asr_active || m_pending_start; }
+
     /* ---------------- 触发接口 (任意上下文可调, 全部非阻塞) ---------------- */
 
     /*! 请求开始一轮语音会话 (按下录音键 BTN_REC_PIN, 现为 GPIO2) */
@@ -41,6 +50,17 @@ public:
 
     /*! 给 voice_task 用: 拿命令队列句柄, 自己阻塞等 */
     QueueHandle_t voice_queue(void) const { return m_voice_q; }
+
+    /*! ★ 投一条【物理按键原始事件】(按键回调 → resp_q → LVGL 任务)。
+     *
+     *  ★★ 这里只报告"哪个键按下/松开", 语义判断全在 drain_queues 里 ——
+     *    因为只有那里同时看得到"面板开没开"和"是不是在录音"。
+     *    例: same KEY_B, 面板关着 = 录音 (按下开始/松开结束); 面板开着 = 取消。
+     *    ⚠️ 不要在按键回调里加任何时间/状态判断 —— 那是 LVGL 层的事。
+     *  @param key      KEY_A(IO2) / KEY_B(IO42)
+     *  @param pressed  true=按下, false=松开
+     *  任意上下文可调 (非阻塞)。 */
+    void post_key(int key, bool pressed);
 
     /* ---------------- 生产者接口 (voice_task / ws_keeper 投结果) ---------------- */
 
@@ -99,6 +119,21 @@ private:
      *  跑在 websocket_task 且持锁 → 只做非阻塞投递。 */
     static void on_abroad(const char *payload, int len, void *ctx);
 
+    /*! WS 回调: 网关的 {"type":"weather",...}（svc weather 后自动推一次）。
+     *  跑在 websocket_task 且持锁 → 只做解析+存快照，不碰 LVGL。
+     *  上屏由 drain_queues 看到 weather::take_dirty() 后调 weather_view::apply()。 */
+    static void on_weather(const char *payload, int len, void *ctx);
+
+    /*! WS 回调: 网关的 {"type":"usage",...}（切到 usage 服务后每 2 秒自动推）。
+     *  跑在 websocket_task 且持锁 → 只解析 + 投 resp_q，不碰 LVGL。
+     *  ★ 载荷塞在 resp_msg_t 的 u.usage 里（42 字节，不超原来的 64 字节 union）✓ */
+    static void on_usage(const char *payload, int len, void *ctx);
+
+    /*! WS 回调: 网关的 {"type":"balance",...}（切到 balance 服务后推一次, 之后靠 get）。
+     *  跑在 websocket_task 且持锁 → 只解析 + 投 resp_q，不碰 LVGL。
+     *  ★ 载荷用 resp_msg_t 的 u.f32（余额本身就是单精度够用）✓ */
+    static void on_balance(const char *payload, int len, void *ctx);
+
     bool push_voice_cmd(voice_cmd_t cmd, int32_t arg); 
 
     /* ---------------- ask_router 的三个注入回调 ----------------
@@ -118,6 +153,17 @@ private:
      *  会被下一轮开头的 voice_q_drain 当成"用户松手"而取消新会话);
      *  ② 录音期间禁止转屏 (lvgl_port_set_encoder_enabled)。 */
     volatile bool m_asr_active = false;
+
+    /*! "已请求开始、但 voice_task 还没切完服务" 的窗口标志。
+     *
+     *  ★★ 为什么需要: voice_task 会话开头要 set_service("text") + 等 svc_ok
+     *     (VOICE_SVC_WAIT_MS = 300ms), 而 m_asr_active 要等 post_resp_status(STARTED)
+     *     才置 true —— 那 300ms 里 is_asr_active() 会返回 false。
+     *     如果这时候天气轮询切走 svc weather, 网关的服务就变成 weather 了,
+     *     voice_task 却以为 text 切好了 → 发 start 到错的服务 → 整轮语音静默失效。
+     *  ⇒ voice_start() 置 true, post_resp_status(STARTED) 清掉 (转由 m_asr_active 接管)。
+     */
+    volatile bool m_pending_start = false;
 
     RtAsr m_asr;   /*!< 全局常驻实例 (坑#4) */
     Llm   m_llm;   /*!< 同上: 地址交给了 WS 回调表, 生命周期必须是进程级 */

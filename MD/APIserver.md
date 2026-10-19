@@ -13,7 +13,7 @@
 ---
 
 > 服务器: 39.104.84.177 · 端口: 18888 · 2026-08-22 更新
-> 一条长连接 + 应用层切换: text(语音听写) / llm(大模型) / openclaw(明岚) / usage(服务器监控) / weather(天气) / echo(调试)
+> 一条长连接 + 应用层切换: text(语音听写) / llm(大模型) / openclaw(明岚) / usage(服务器监控) / weather(天气) / balance(余额) / echo(调试)
 
 ---
 
@@ -30,6 +30,7 @@ ws://39.104.84.177:18888/?token=***
 {"type":"svc","service":"openclaw"}   → {"type":"svc_ok","service":"openclaw"}
 {"type":"svc","service":"usage"}      → {"type":"svc_ok","service":"usage"}
 {"type":"svc","service":"weather"}    → {"type":"svc_ok","service":"weather"}
+{"type":"svc","service":"balance"}    → {"type":"svc_ok","service":"balance"}
 {"type":"svc","service":"echo"}       → {"type":"svc_ok","service":"echo"}
 ```
 
@@ -71,6 +72,30 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
+## 7. type=balance 余额
+
+切换后**连回两条**（`svc_ok` 紧跟 `balance`）：
+```json
+{"type":"svc_ok","service":"balance"}
+{"type":"balance","balance":true,"total":11.96,"t":1792411591}
+```
+
+**⚠️ 不会定时推送** —— 想刷新就主动发 `{"type":"get"}`，返回同样一条 `balance` ✓
+**切走再切回来会重新推一次** ✓
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `total` | number | **余额（元，2 位小数）** |
+| `t` | int | 服务端时间戳（秒） |
+| `balance` | bool | 恒 `true`（用于区分类型）|
+
+**出错时**：
+```json
+{"type":"error","code":5,"message":"balance 获取失败: ..."}
+```
+
+---
+
 ## 2. type=text 语音听写
 
 ```
@@ -109,7 +134,7 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
-## 7. 错误
+## 8. 错误
 
 ```json
 {"type":"error","code":1,"message":"讯飞错误"}
@@ -120,7 +145,7 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
-## 8. 连接保活
+## 9. 连接保活
 
 - 服务器 120s 协议层 ping 检测死连接（正常板子自动回 pong，不会误踢）
 - 板子建议 20~40s 发一次 `{"type":"ping"}` 应用层保活
@@ -128,7 +153,7 @@ ws://39.104.84.177:18888/?token=***
 
 ---
 
-## 9. 部署
+## 10. 部署
 
 | 项 | 值 |
 |---|---|
@@ -138,14 +163,14 @@ ws://39.104.84.177:18888/?token=***
 | 日志 | `gateway.log` |
 | 板端示例 | `board_example/`（gateway_client + handle_text） |
 
-## 10. 消息一览
+## 11. 消息一览
 
 | 方向 | type | 含义 | 处理 |
 |---|---|---|---|
 | 上行 | svc | 切换服务 | - |
 | 上行 | start/end | 语音轮次触发 | - |
 | 上行 | chat/clear | 对话/清空 | - |
-| 上行 | get | 主动刷新天气 | - |
+| 上行 | get | 主动刷新天气 / 余额 | - |
 | 上行 | ping | 心跳 | - |
 | 下行 | svc_ok | 切换确认 | - |
 | 下行 | partial | 增量字(text)/流式字(对话) | 追加显示 |
@@ -153,5 +178,6 @@ ws://39.104.84.177:18888/?token=***
 | 下行 | reply | 对话完整回复 | 整体替换 = 完成 |
 | 下行 | usage | 服务器监控(2s一跳) | 定时更新 |
 | 下行 | weather | 天气数据 | 刷新显示 |
+| 下行 | balance | 余额(切过去 / `get` 时推一次) | 刷新显示 |
 | 下行 | pong | 心跳应答 | - |
 | 下行 | error | 错误 | 处理提示 |

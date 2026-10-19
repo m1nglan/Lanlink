@@ -78,14 +78,15 @@ void ui_Server_screen_init(void)
     lv_label_set_text(ui_cpu, "CPU");
 
     ui_cpunum = lv_label_create(ui_cpuPanel);
-    lv_obj_set_width(ui_cpunum, 56);
+    lv_obj_set_width(ui_cpunum, 59);
     lv_obj_set_height(ui_cpunum, 25);
-    lv_obj_set_x(ui_cpunum, 40);
+    lv_obj_set_x(ui_cpunum, 36);
     lv_obj_set_y(ui_cpunum, -8);
     lv_obj_set_align(ui_cpunum, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_cpunum, "19%");
+    lv_label_set_text(ui_cpunum, "--%");
     lv_obj_set_style_text_color(ui_cpunum, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_cpunum, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_align(ui_cpunum, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_cpunum, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_cpubar = lv_bar_create(ui_cpuPanel);
@@ -114,7 +115,7 @@ void ui_Server_screen_init(void)
     lv_obj_set_x(ui_cputext, -23);
     lv_obj_set_y(ui_cputext, 3);
     lv_obj_set_align(ui_cputext, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_cputext, "0.3/2 Core");
+    lv_label_set_text(ui_cputext, "--/-- Core");
     lv_obj_set_style_text_color(ui_cputext, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_cputext, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(ui_cputext, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -145,15 +146,15 @@ void ui_Server_screen_init(void)
     lv_obj_set_style_text_font(ui_ram, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_ramnum = lv_label_create(ui_ramPanel);
-    lv_obj_set_width(ui_ramnum, 51);
+    lv_obj_set_width(ui_ramnum, 59);
     lv_obj_set_height(ui_ramnum, 25);
-    lv_obj_set_x(ui_ramnum, 40);
+    lv_obj_set_x(ui_ramnum, 36);
     lv_obj_set_y(ui_ramnum, -8);
     lv_obj_set_align(ui_ramnum, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_ramnum, "91%");
+    lv_label_set_text(ui_ramnum, "--%");
     lv_obj_set_style_text_color(ui_ramnum, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_ramnum, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_align(ui_ramnum, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_align(ui_ramnum, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_ramnum, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_rambar = lv_bar_create(ui_ramPanel);
@@ -182,7 +183,7 @@ void ui_Server_screen_init(void)
     lv_obj_set_x(ui_ramtext, -24);
     lv_obj_set_y(ui_ramtext, 3);
     lv_obj_set_align(ui_ramtext, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_ramtext, "1.8G / 2G");
+    lv_label_set_text(ui_ramtext, "--G / --G");
     lv_obj_set_style_text_color(ui_ramtext, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_ramtext, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(ui_ramtext, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -213,15 +214,15 @@ void ui_Server_screen_init(void)
     lv_obj_set_style_text_font(ui_DISC, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_disknum = lv_label_create(ui_discPanel);
-    lv_obj_set_width(ui_disknum, 51);
+    lv_obj_set_width(ui_disknum, 59);
     lv_obj_set_height(ui_disknum, 25);
-    lv_obj_set_x(ui_disknum, 40);
+    lv_obj_set_x(ui_disknum, 36);
     lv_obj_set_y(ui_disknum, -8);
     lv_obj_set_align(ui_disknum, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_disknum, "91%");
+    lv_label_set_text(ui_disknum, "--%");
     lv_obj_set_style_text_color(ui_disknum, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_disknum, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_align(ui_disknum, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_align(ui_disknum, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_disknum, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_diskbar = lv_bar_create(ui_discPanel);
@@ -250,7 +251,7 @@ void ui_Server_screen_init(void)
     lv_obj_set_x(ui_dixktext, -16);
     lv_obj_set_y(ui_dixktext, 3);
     lv_obj_set_align(ui_dixktext, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_dixktext, "33.2G/39.1G");
+    lv_label_set_text(ui_dixktext, "--G/--G");
     lv_obj_set_style_text_color(ui_dixktext, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_dixktext, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_dixktext, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -337,11 +338,11 @@ void ui_Server_screen_init(void)
     lv_scale_set_label_show(ui_rxtxchar_Yaxis2, false);
     lv_chart_series_t * ui_rxtxchar_series_1 = lv_chart_add_series(ui_rxtxchar, lv_color_hex(0x62A5FF),
                                                                    LV_CHART_AXIS_PRIMARY_Y);
-    static lv_coord_t ui_rxtxchar_series_1_array[] = { 1, 2, 3, 2, 1 };
+    static lv_coord_t ui_rxtxchar_series_1_array[] = { 0 };
     lv_chart_set_series_ext_y_array(ui_rxtxchar, ui_rxtxchar_series_1, ui_rxtxchar_series_1_array);
     lv_chart_series_t * ui_rxtxchar_series_2 = lv_chart_add_series(ui_rxtxchar, lv_color_hex(0xF94848),
                                                                    LV_CHART_AXIS_PRIMARY_Y);
-    static lv_coord_t ui_rxtxchar_series_2_array[] = { 3, 3, 1, 8, 15 };
+    static lv_coord_t ui_rxtxchar_series_2_array[] = { 0 };
     lv_chart_set_series_ext_y_array(ui_rxtxchar, ui_rxtxchar_series_2, ui_rxtxchar_series_2_array);
 
     lv_obj_set_style_size(ui_rxtxchar, 5, 5, LV_PART_INDICATOR | LV_STATE_DEFAULT);
@@ -378,7 +379,7 @@ void ui_Server_screen_init(void)
     lv_obj_set_x(ui_upnum, -29);
     lv_obj_set_y(ui_upnum, 1);
     lv_obj_set_align(ui_upnum, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_upnum, "3kb");
+    lv_label_set_text(ui_upnum, "--kb");
     lv_obj_set_style_text_color(ui_upnum, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_upnum, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(ui_upnum, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -390,7 +391,7 @@ void ui_Server_screen_init(void)
     lv_obj_set_x(ui_downnum, -29);
     lv_obj_set_y(ui_downnum, 17);
     lv_obj_set_align(ui_downnum, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_downnum, "3kb");
+    lv_label_set_text(ui_downnum, "--kb");
     lv_obj_set_style_text_color(ui_downnum, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_downnum, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(ui_downnum, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);

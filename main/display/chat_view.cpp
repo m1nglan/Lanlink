@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 
 #include "lvgl.h"
+#include "display/lvgl_port.hpp"  /* lvgl_port_set_focus_override: 让聊天面板拿焦点 */
 #include "ui.h"              /* ui_contextPanel / ui_merollpanel / ui_resrollpanel / ui_font_ch14 */
 
 static const char *TAG = "chat_view";
@@ -84,8 +85,10 @@ static bool      s_asr_active = false;
 /* 上次挂钩的是哪个 contextPanel —— 用来做【一次性初始化】(删占位气泡)。
  * ⚠️ 原来它还兼"屏幕重建检测", 但现在的导出**离开聊天屏不销毁** →
  *    ui_contextPanel 指针从头到尾不变 → 这个判断只在开机第一次成立。 */
-static lv_obj_t *s_ctx_hooked = NULL;
+/* ★ 前置声明: 定义在文件后半段 (滚动那块), 但 sync_screen 里挂事件回调要用它。 */
+static void ctx_key_cb(lv_event_t *e);
 
+static lv_obj_t *s_ctx_hooked = NULL;
 /* ================================================================
  * 环形缓冲 —— 历史消息的文本备份
  *
@@ -408,6 +411,15 @@ bool sync_screen(void)
             ESP_LOGW(TAG, "聊天屏被重建, 清空气泡记录");
         }
         s_ctx_hooked    = ui_contextPanel;
+        /* ★ 挂"编码器滚动"回调 (只挂一次)。见 ctx_key_cb 的说明。 */
+        lv_obj_add_event_cb(ui_contextPanel, ctx_key_cb, LV_EVENT_KEY, NULL);
+        /* ★★ 必须开【事件冒泡】—— 这是"滚到头就切屏"能成立的前提。
+         *   LVGL 默认**不冒泡**: 键盘事件发给聚焦对象后, 如果对象没消费就到此为止,
+         *   父链上的 ui_chat 永远收不到 ✗
+         *   开了之后: ctx_key_cb 在"到头"时 return 不消费 → 事件冒泡到 ui_chat →
+         *   触发 SquareLine 的 ui_event_chat (LV_KEY_RIGHT → 切回 ui_home) ✓
+         *   ⚠️ 没到头时我们用 lv_event_stop_bubbling() 主动拦住 → 不会边滚边切屏 ✓ */
+        lv_obj_add_flag(ui_contextPanel, LV_OBJ_FLAG_EVENT_BUBBLE);
         s_bubble_cnt    = 0;
         s_live_label    = NULL;
         s_live_res      = NULL;
@@ -443,6 +455,16 @@ bool sync_screen(void)
         s_live_slot_res = -1;
         s_end_ms        = 0;
     }
+
+    /* ④ ★ 焦点归属: 在 chat 屏上让 ui_contextPanel 拿焦点, 别的屏交还给整屏。
+     *
+     *  为什么: 编码器旋转时 LVGL 把 LV_KEY_LEFT/RIGHT 发给【聚焦对象】。
+     *   · 默认 (整屏)  → SquareLine 的屏级回调切屏 ✓ 仍是其它屏的行为
+     *   · chat 屏      → 这里让面板拿焦点 → ctx_key_cb 先用左右键上下翻记录,
+     *                    滚到头再 stop_bubbling 放弃消费 → 冒泡到屏 → 切屏 ✓
+     *  ★ 每轮都设 (幂等): lvgl_port 那边只在值变化时才真的改 group。
+     *  ★ 只传给 lvgl_port 一个指针, 它自己不认识 ui_contextPanel ✓ */
+    lvgl_port_set_focus_override((lv_screen_active() == ui_chat) ? ui_contextPanel : nullptr);
     return true;
 }
 
@@ -471,7 +493,91 @@ static void close_bubble(void)
     s_live_slot_me = -1;
 }
 
-/* 收到一条 ASR 文本 → 上屏 (由 drain_queues 在 lvgl 任务里调用) */
+void clear_all(void)
+{
+    /* ★ 清空整个聊天面板 —— 切换模型时用 (上下文都清了, 旧气泡留着没意义)。
+     *  ① 删掉 ui_contextPanel 的所有子对象 (气泡)。
+     *     label 的 deleted 回调 (label_deleted_cb) 会把 s_live_* 置 NULL,
+     *     所以这里删完不用再担心悬空指针。
+     *  ② 清内部计数和 PSRAM 环形缓冲 —— 否则 ring_replay() 会把旧消息复活。 */
+    if (ui_contextPanel != NULL && lv_obj_is_valid(ui_contextPanel)) {
+        lv_obj_clean(ui_contextPanel);
+    }
+    s_bubble_cnt    = 0;
+    s_live_label    = NULL;
+    s_live_res      = NULL;
+    s_live_slot_me  = -1;
+    s_live_slot_res = -1;
+    s_end_ms        = 0;
+
+    s_ring_cnt  = 0;
+    s_ring_head = 0;
+    /* ★★ 必须释放 PSRAM 缓冲区, 不能写 text[0] ——
+     *   ring_slot_t.text 是【指针】, NULL 表示空槽; 往 NULL 写会 StoreProhibited ✗
+     *   (踩过: EXCVADDR=0x0, PC 落在这一行)
+     *   释放是安全的: ring_append 在覆盖前会先 heap_caps_free(s->text),
+     *   且它和 ring_update 都判 NULL, 所以这里置 NULL 后不会被二次释放 ✓ */
+    for (int i = 0; i < CHAT_RING_SLOTS; i++) {
+        if (s_ring[i].text != NULL) {
+            heap_caps_free(s_ring[i].text);
+            s_ring[i].text = NULL;
+        }
+        s_ring[i].is_me = false;
+    }
+    ESP_LOGI(TAG, "聊天面板已清空");
+}
+
+/*! 每转一格编码器, 聊天记录滚多少像素。
+ *  ★ 40 ≈ 一个气泡行高的 2/3, 转两三格就能看到明显移动, 又不至于一下飞过整屏。 */
+#define CHAT_SCROLL_STEP_PX  (40)
+
+/*! "到底/到顶"的容差 (px)。
+ *  ★ 为什么不是 0: 布局是 flex + 圆整, scroll_bottom() 在真正到底时可能返回 1 而不是 0
+ *    → 用 `<= 0` 判断会永远不成立 → 滚到底也切不了屏 ✗ (实测踩过) */
+#define CHAT_SCROLL_END_TOL  (2)
+
+/* ================================================================
+ * 聊天面板的"编码器滚动"(挂在 ui_contextPanel 的 LV_EVENT_KEY 上)
+ *
+ * ★ 为什么是 LEFT/RIGHT 而不是 UP/DOWN:
+ *   编码器 (LV_INDEV_TYPE_ENCODER) 旋转时发的是 LV_KEY_LEFT / LV_KEY_RIGHT,
+ *   而 lv_obj 的滚动默认只响应 UP/DOWN → 所以必须自己翻译 ✗
+ *
+ * ★ 为什么"到头就 return 而不消费事件":
+ *   LVGL 的事件会往父对象冒泡。到顶/到底时不消费 → 冒泡到 ui_chat 屏 →
+ *   触发 SquareLine 的 ui_event_chat (它监听 LV_KEY_RIGHT 切屏) ✓
+ *   ⇒ 效果就是"滚到头继续转 = 切屏", 用户不需要记任何模式 ✓
+ *   ⚠️ 反过来: 没到头的时侯必须 stop_bubbling, 否则"边滚边切屏"会同时发生 ✗
+ * ================================================================ */
+static void ctx_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_KEY) {
+        return;
+    }
+    lv_obj_t *panel = (lv_obj_t *)lv_event_get_target(e);
+    if (panel == NULL || !lv_obj_is_valid(panel)) {
+        return;
+    }
+    const uint32_t key = lv_event_get_key(e);
+
+    if (key == LV_KEY_LEFT) {
+        /* 向上翻。scroll_top 是"上方还剩多少可滚" → 0 表示已经在顶上 */
+        if (lv_obj_get_scroll_top(panel) <= CHAT_SCROLL_END_TOL) {
+            return;                                  /* 到顶 → 不消费 → 冒泡给屏 → 切屏 */
+        }
+        lv_obj_scroll_by(panel, 0, +CHAT_SCROLL_STEP_PX, LV_ANIM_ON);
+        lv_event_stop_bubbling(e);                   /* ★ 消费掉, 别让屏也收到 */
+    } else if (key == LV_KEY_RIGHT) {
+        /* 向下翻。scroll_bottom 是"下方还剩多少可滚" → 0 表示已经在底 */
+        if (lv_obj_get_scroll_bottom(panel) <= CHAT_SCROLL_END_TOL) {
+            return;                                  /* 到底 → 不消费 → 冒泡给屏 → 切屏 */
+        }
+        lv_obj_scroll_by(panel, 0, -CHAT_SCROLL_STEP_PX, LV_ANIM_ON);
+        lv_event_stop_bubbling(e);
+    }
+}
+
+/*! 收到一条 ASR 文本 → 上屏 (由 drain_queues 在 lvgl 任务里调用) */
 void show_asr(const char *text, bool is_final)
 {
     if (text == NULL) {
@@ -533,6 +639,14 @@ void begin_asr(void)
     s_end_ms     = 0;
     s_asr_active = true;
     s_live_label = push("", true, "按下键 STARTED", &s_live_slot_me);
+
+    /* ★★ 录音开始时【直接跳到底部】—— 用户要看到自己刚说的那句和最新回复。
+     *   ⚠️ 只在这一个时机滚: 别的时候一律不动滚动位置, 否则用户正往上翻历史
+     *     查看旧消息时会被强行拽回底部 ✗
+     *   ⚠️ LV_ANIM_OFF: 录音是"立刻要看到", 不要动画延迟。 */
+    if (ui_contextPanel != NULL && lv_obj_is_valid(ui_contextPanel)) {
+        lv_obj_scroll_to_y(ui_contextPanel, LV_COORD_MAX, LV_ANIM_OFF);
+    }
 }
 
 /* 收到一段 LLM 回复 → 写进"对方"的气泡 (灰底 / 靠左)。

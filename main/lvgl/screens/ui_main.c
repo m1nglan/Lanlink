@@ -22,7 +22,6 @@ void ui_event_main(lv_event_t * e)
         linkshow_Animation(ui_link, 500);
         Lanshow_Animation(ui_Lan, 500);
         longingext_Animation(ui_loadingtext, 2000);
-        _ui_screen_change(&ui_home, LV_SCREEN_LOAD_ANIM_FADE_ON, 500, 7000, &ui_home_screen_init);
     }
 }
 
