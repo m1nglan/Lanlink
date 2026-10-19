@@ -197,36 +197,45 @@ main/
 │
 ├── business/                   # 业务层（不认识 LVGL）
 │   ├── bus_msg.hpp             # ★ 纯类型：三条队列的消息结构 (voice/resp/stream)
-│   ├── ui_bridge.{hpp,cpp}     # ★ 队列 + 回调接线 + 会话控制 + 消费分发
+│   ├── ui_bridge.{hpp,cpp}     # ★ 队列 + 回调接线 + 会话控制 + 消费分发 + 按键语义
 │   ├── ask_router.{hpp,cpp}    # ★ "何时把哪段文本发给谁"这条策略（靠注入回调，不认识队列/LVGL）
 │   ├── voice.{hpp,cpp}         # voice_task：切服务→start→采音→end
+│   ├── weather_poll.{hpp,cpp}  # 天气定时拉取（开机一次 + 每 5 分钟；忙则 1 分钟重试）
 │   └── ws_keeper.{hpp,cpp}     # 连接保活与重连（独占 init/deinit/重连）
 │
 ├── display/                    # 显示层
-│   ├── chat_view.{hpp,cpp}     # ★ 气泡创建/更新/销毁 + 生命周期状态机 + 历史环形缓冲
-│   ├── lvgl_port.{hpp,cpp}     # LVGL 移植：任务/tick/锁/绘图缓冲/编码器 indev
+│   ├── chat_view.{hpp,cpp}     # ★ 气泡创建/更新/销毁 + 生命周期状态机 + 历史环形缓冲 + 编码器滚动
+│   ├── cho_view.{hpp,cpp}      # 模型选择面板（开合 / 焦点 / 选中项 + NVS 持久化）
+│   ├── msg_ball.{hpp,cpp}      # "有新消息"提示球（82↔32 收缩动画）
+│   ├── msg_panel.{hpp,cpp}     # 通知展开面板（流式正文 + 编码器选条目）
+│   ├── server_view.{hpp,cpp}   # Server 屏：CPU/RAM/磁盘/网速 + 双曲线（Y 轴自适应）
+│   ├── balance_view.{hpp,cpp}  # Balance 屏：余额（含 "----" 刷新占位）
+│   ├── weather_view.{hpp,cpp}  # 天气上屏：kind→图片 + 温度 + 中文描述
+│   ├── lvgl_port.{hpp,cpp}     # LVGL 移植：任务/tick/锁/绘图缓冲/编码器 indev/时间/启动门/焦点组
 │   └── lcd_display.{hpp,cpp}   # ST7789 面板初始化
 │
 ├── drivers/                    # 协议/外设驱动（不认业务）
 │   ├── ws.{hpp,cpp}            # 通用 WebSocket + 按 type 查表分发
 │   ├── rtasr.{hpp,cpp}         # text 服务协议（asr / final）
 │   ├── llm.{hpp,cpp}           # 对话服务协议（partial / reply）+ 增量累积
+│   ├── weather.{hpp,cpp}       # weather 服务协议（解析 + 快照 + 脏标记）
 │   ├── i2s_mic.{hpp,cpp}       # INMP441 采集
 │   ├── button_edge.{hpp,cpp}   # 按键：GPIO 中断 + esp_timer 消抖
 │   ├── encoder.{hpp,cpp}       # 编码器：ISR + 查表解码
-│   ├── wifi.{hpp,cpp}          # WiFi STA
+│   ├── wifi.{hpp,cpp}          # WiFi STA + SNTP（北京时区）
 │   └── gpio_isr_once.hpp       # GPIO ISR 服务只装一次的 helper
 │
 └── lvgl/                       # SquareLine 导出（UI 画面 + 字体 + 图片，勿手改）
 ```
 
-**三个分层原则（详见 [`MD/CHAIN.md`](MD/CHAIN.md) §4）：**
+**分层原则（详见 [`MD/CHAIN.md`](MD/CHAIN.md) §4）：**
 
 | 模块 | **不该做什么** |
 |---|---|
-| `ui_bridge` | 不做显示、不做转发决策 |
+| `ui_bridge` | 不做显示、不做转发决策、**不认识任何屏/控件符号**（只调 display 层的接口）|
 | `ask_router` | **不认识 LVGL、不认识队列**（三个动作靠 `init()` 注入的回调）|
-| `chat_view` | **不认识业务**（不知道 ASR / LLM / openclaw 的存在）|
+| `chat_view` / `cho_view` / `msg_panel` | **不认识业务**（不知道 ASR / LLM / openclaw 的存在）|
+| `weather` / `server_view` / `balance_view` | **display 层不反向依赖 business 层**（"该用哪个服务"由 `ui_bridge` 判断后传进来）|
 
 ### 三条队列
 
@@ -241,7 +250,8 @@ main/
 **三条铁律：**
 1. **WS 回调里只能非阻塞投递** —— 那时正持 `client->lock`，阻塞会拖死整个收发
 2. **值拷贝原则** —— 队列靠 `memcpy` 搬字节，**载荷里绝不能有指针**
-33. **`stream_q` 深度必须是 1** —— 长文本只占一份，`BUS_TEXT_LEN` 才敢开到 2048
+3. **`stream_q` 深度必须是 1** —— 长文本只占一份，`BUS_TEXT_LEN` 才敢开到 2048
+
 ### 任务布局
 
 | 核 | 任务 | 优先级 | 栈 | 职责 |
@@ -256,18 +266,25 @@ main/
 ### 一次完整问答的时序
 
 ```
- t=0ms    按下录音键 → [中断] 消抖 → on_button_edge → voice_start → voice_q
+ t=0ms    按下录音键(GPIO42) → [中断] 消抖 → on_button_edge → post_key(KEY_B,true) → resp_q
+          ★ 语义判断在 drain_queues 里: 面板没开 → 就是录音键
  t=10ms   voice_task: 等连接 → 切 text → 等 svc_ok（实测 50ms）
  t=60ms   asr.start + mic.start
  t=60ms   ★ 绿泡出现（空气泡）        ← STARTED 走 resp_q，立刻
+ t=60ms   ★ 同时跳到底部（录音时要看到自己刚说的）
  t=60ms~  asr 逐字增长 → 绿泡逐字刷新
  t=3.9s   松开 → mic.stop → asr.end → ENDED
  t=5.4s   final 到达（end + 1470ms）→ 绿泡显示最终版（带标点）
-          同时 ask_router 立刻转发 → svc openclaw(31ms) → chat "[Lanlink] …"
+          同时 ask_router 立刻转发 → svc <当前模型>(31ms) → chat "[Lanlink] …"
+          <当前模型> = openclaw(明岚) 或 llm(DeepSeek)，由"模型选择面板"决定并存 NVS
  t=5.4s   ★ 灰泡 "(思考中)" 出现        ← 因为明岚要 20 秒才回
  t=5.4s   ★ 2.5s 宽限期到 → 绿泡定格
- t=26s    明岚 reply 到 → 灰泡文字被覆盖（占位自动消失）
+ t=26s    reply 到 → 灰泡文字被覆盖（占位自动消失）
+          ★ 如果此时不在聊天屏: 提示球收缩 + 通知面板正文同步更新
 ```
+
+**⚠️ 期间 `ask_router` 会起一个 30 秒冷却（`is_busy()`），天气轮询和其他 `svc` 使用者都会避开它** ——
+否则切走服务会把还没回来的回复掐掉。
 
 ---
 
@@ -326,22 +343,17 @@ SquareLine 导出的中文字体**可能是压缩的** —— 看 `main/lvgl/fon
 | 文档 | 内容 |
 |---|---|
 | **[`MD/CHAIN.md`](MD/CHAIN.md)** | ★ **架构说明**：分层 / 职责边界 / 五条链 / 队列 / 全局约束 |
-| **[`MD/PROTOCOL.md`](MD/PROTOCOL.md)** | ★ **协议 V2 完整规范**（改协议前必读）|
-| [`AGENTS.md`](AGENTS.md) | 开发指南：环境、引脚、常见坑（**给 AI 助手看的**）|
+| **[`MD/PROTOCOL.md`](MD/PROTOCOL.md)** | ★ **协议 V2 完整规范**（板端视角，改协议前必读）|
+| **[`MD/APIserver.md`](MD/APIserver.md)** | ★ **网关接口文档 V1.5**（服务端视角，**当前在用** —— 含 `balance`）|
+| [`AGENTS.md`](AGENTS.md) | 开发指南：环境、引脚、**14 条常见坑**（给 AI 助手看的）|
 | [`MD/STACK_OVERFLOW.md`](MD/STACK_OVERFLOW.md) | 栈溢出根因复盘（**必读**）|
-| [`MD/HANDOFF.md`](MD/HANDOFF.md) | 本次架构重构的交接文档（**已归档**，记的是"重构中踩过什么坑"）|
-| [`MD/REBUILD.md`](MD/REBUILD.md) | 本次重构的计划书（**已归档**）|
-| [`MD/APIserver.md`](MD/APIserver.md) | ⚠️ **已被 `PROTOCOL.md` 取代**（V1.5，仅供理解历史）|
+| [`MD/HANDOFF.md`](MD/HANDOFF.md) | 架构重构的交接文档（**已归档**，记的是"重构中踩过什么坑"）|
+| [`MD/REBUILD.md`](MD/REBUILD.md) | 架构重构的计划书（**已归档**）|
 | [`MD/APP_FSM.md`](MD/APP_FSM.md) | ⚠️ **旧**架构（重构前的 `AppFsm` 状态机），仅供理解历史 |
 | [`MD/problem.md`](MD/problem.md) | 历史问题排查记录 |
-| [`tools/`](tools/) | 网关协议探针（纯 Node，无依赖）+ TTS 测试语音 |
+| **[`tools/`](tools/)** | **网关协议探针**（纯 Node，无依赖）<br>`gw_probe*.mjs`（对话/服务切换）· **`gw_probe_weather.mjs`**（天气，含"不切服务时 `get` 被 echo 吞掉"的实证）|
 
 ---
-协议（V1.1 长连接）
-- [STACK_OVERFLOW.md](STACK_OVERFLOW.md) — 栈溢出根因复盘（必读）
-- [problem.md](problem.md) — 历史问题排查记录
-- [HANDOFF.md](HANDOFF.md) — 项目交接文档
-- [AGENTS.md](AGENTS.md) — 项目开发指南
 
 ## License
 
