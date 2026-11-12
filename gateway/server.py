@@ -38,12 +38,12 @@ log = logging.getLogger("gateway")
 CONFIG = {
     "host": "0.0.0.0",
     "port": 18888,
-    "token": "lanlink2026",            # 板子连接鉴权 token
+    "token": "",                      # 板子鉴权 token（放 config.json，勿提交）
     "default_service": "echo",         # 默认服务(临时echo便于调试, 调完改回text)
     "xfyun": {
-        "app_id": "c943edd0",
-        "api_key": "fadda09de753c118a20be29a0a7f25d6",
-        "api_secret": "Y2I2MWI4MmE4MzkzOTYxMWUzZTU1NDdk",
+        "app_id": "",                 # 讯飞（放 config.json）
+        "api_key": "",                # 讯飞（放 config.json）
+        "api_secret": "",             # 讯飞（放 config.json）
         "wpgs": True,   # True=边说边出字(可能有早期噪音) False=结束才出(更准)
     },
     "llm": {
@@ -63,8 +63,8 @@ CONFIG = {
         "session_key": "agent:main:main",   # 接入 main 会话(主子微信可见)
     },
     "qweather": {
-        "host": "mk49vkv76j.re.qweatherapi.com",   # 和风专属 API host
-        "key": "36ff58cb4a424d0bbdb181cbcc836c93",  # 会被 config.json 覆盖
+        "host": "",                   # 和风专属 host（放 config.json）
+        "key": "",                    # 和风 key（放 config.json）
         "location": "101080109",      # 呼和浩特 (lat 40.81515, lon 111.66216)
     },
 }
